@@ -14,7 +14,8 @@
       "outputs": []
     },
     "test": {
-      "outputs": ["coverage/**"]
+      "outputs": ["coverage/**"],
+      "env": ["DATABASE_URL"]
     },
     "typecheck": {
       "dependsOn": ["^build"],
