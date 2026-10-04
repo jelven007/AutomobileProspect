@@ -1,0 +1,26 @@
+{
+  "name": "leadops-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "汽车行业潜客运营系统 - Web Monorepo",
+  "packageManager": "pnpm@9.0.0",
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=9.0.0"
+  },
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "test": "turbo run test",
+    "typecheck": "turbo run typecheck",
+    "clean": "turbo run clean && rimraf node_modules",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\""
+  },
+  "devDependencies": {
+    "turbo": "^2.0.0",
+    "prettier": "^3.3.0",
+    "rimraf": "^5.0.0",
+    "typescript": "^5.5.0"
+  }
+}

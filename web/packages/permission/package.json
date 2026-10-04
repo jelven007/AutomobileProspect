@@ -1,0 +1,16 @@
+{
+  "name": "@leadops/permission",
+  "version": "0.0.1",
+  "private": true,
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "lint": "eslint src --ext .ts,.tsx",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@leadops/tsconfig": "workspace:*",
+    "@leadops/eslint-config": "workspace:*",
+    "typescript": "^5.3.3"
+  }
+}

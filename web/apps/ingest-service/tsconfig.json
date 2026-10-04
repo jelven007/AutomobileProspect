@@ -1,0 +1,11 @@
+{
+  "extends": "@leadops/tsconfig/node.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "target": "ES2022",
+    "module": "commonjs",
+    "esModuleInterop": true
+  },
+  "include": ["src/**/*.ts"]
+}

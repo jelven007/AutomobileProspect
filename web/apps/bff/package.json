@@ -1,0 +1,40 @@
+{
+  "name": "@leadops/bff",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "dev": "NODE_OPTIONS=\"--max-old-space-size=4096\" tsx watch src/main.ts",
+    "build": "nest build",
+    "start": "NODE_OPTIONS=\"--max-old-space-size=4096\" node dist/main.js",
+    "lint": "eslint src --ext .ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fastify/multipart": "^8.3.0",
+    "@leadops/ingest-service": "workspace:*",
+    "@leadops/types": "workspace:*",
+    "@nestjs/common": "^10.3.0",
+    "@nestjs/config": "^3.1.1",
+    "@nestjs/core": "^10.3.0",
+    "@nestjs/platform-fastify": "^10.3.0",
+    "@prisma/client": "5.22.0",
+    "exceljs": "^4.4.0",
+    "jszip": "^3.10.2",
+    "ky": "^1.2.0",
+    "prisma": "5.22.0",
+    "reflect-metadata": "^0.2.1",
+    "rxjs": "^7.8.1",
+    "ulid": "^2.3.0",
+    "yaml": "^2.4.5"
+  },
+  "devDependencies": {
+    "@leadops/eslint-config": "workspace:*",
+    "@leadops/tsconfig": "workspace:*",
+    "@nestjs/cli": "^10.3.0",
+    "@nestjs/schematics": "^10.1.0",
+    "@types/node": "^20.11.0",
+    "fastify": "^4.26.0",
+    "tsx": "^4.7.2",
+    "typescript": "^5.3.3"
+  }
+}

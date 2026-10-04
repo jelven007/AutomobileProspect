@@ -1,0 +1,80 @@
+// BFF 的 Prisma schema。
+// 与 ingest-service/migrations/001_init.sql 严格对齐，不走 prisma migrate。
+// customer 表是分区表（PARTITION BY RANGE ingest_month），Prisma 不原生支持分区，
+// 但只要字段对齐、每条记录带 ingest_month，client 可正常读写。
+// 部分唯一索引 uk_customer_huji (huji_no, ingest_month) WHERE is_deleted=FALSE 由 DDL 兜底，
+// Prisma schema 这里不声明 @@unique，避免 push 回去改坏约束。
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Customer {
+  customer_id    String    @db.Char(26)
+  huji_no        String    @db.VarChar(32)
+  name           String    @db.VarChar(64)
+  gender         String?   @db.Char(1)
+  birth_date     DateTime? @db.Date
+  id_card        String?   @db.VarChar(32)
+  phone_masked   String?   @db.VarChar(16)
+  address        String?   @db.VarChar(256)
+  stat_time      DateTime? @db.Timestamptz(6)
+  province       String?   @db.VarChar(32)
+  city           String?   @db.VarChar(64)
+  district       String?   @db.VarChar(64)
+  occupation     String?   @db.VarChar(64)
+  education      String?   @db.VarChar(32)
+  marital_status String?   @db.VarChar(16)
+  source_file    String?   @db.VarChar(256)
+  source_row     Int?
+  ingest_batch   String?   @db.VarChar(64)
+  ingest_month   DateTime  @db.Date
+  version        Int       @default(1)
+  is_deleted     Boolean   @default(false)
+  created_at     DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at     DateTime  @default(now()) @db.Timestamptz(6)
+
+  @@id([customer_id, ingest_month])
+  @@index([huji_no], map: "idx_customer_huji")
+  @@index([id_card], map: "idx_customer_id_card")
+  @@index([province], map: "idx_customer_province")
+  @@index([city], map: "idx_customer_city")
+  @@map("customer")
+}
+
+model IngestJob {
+  job_id         String    @id @db.VarChar(64)
+  source_bucket  String?   @db.VarChar(128)
+  source_prefix  String?   @db.VarChar(256)
+  status         String    @db.VarChar(16)
+  total_rows     BigInt    @default(0)
+  success_rows   BigInt    @default(0)
+  skipped_rows   BigInt    @default(0)
+  duplicate_rows BigInt    @default(0)
+  written_rows   BigInt    @default(0)
+  warnings       BigInt    @default(0)
+  started_at     DateTime? @db.Timestamptz(6)
+  finished_at    DateTime? @db.Timestamptz(6)
+  error          String?
+
+  @@map("ingest_job")
+}
+
+// ingest_row_log 没有主键，BFF 一期暂不读写它，这里 @@ignore
+// 让 Prisma 承认表存在但不生成 CRUD。
+model IngestRowLog {
+  job_id String? @db.VarChar(64)
+  file   String? @db.VarChar(256)
+  row_no Int?
+  reason String? @db.VarChar(64)
+  raw    Json?
+
+  @@index([job_id], map: "idx_ingest_row_log_job")
+  @@map("ingest_row_log")
+  @@ignore
+}

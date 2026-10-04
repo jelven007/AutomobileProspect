@@ -1,0 +1,41 @@
+# 依赖
+node_modules
+.pnpm-store
+
+# 构建产物
+dist
+build
+.next
+out
+coverage
+
+# 环境
+.env
+.env.local
+.env.*.local
+.env.tos
+
+# 编辑器
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 日志
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# 缓存
+.turbo
+.cache
+.eslintcache
+
+# ingest-service 本地联调产物
+apps/ingest-service/seed/*.xlsx
+apps/ingest-service/seed/*.xls
+

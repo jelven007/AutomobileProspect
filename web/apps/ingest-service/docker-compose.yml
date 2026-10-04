@@ -1,0 +1,65 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: leadops-pg
+    environment:
+      POSTGRES_USER: leadops
+      POSTGRES_PASSWORD: leadops
+      POSTGRES_DB: leadops
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U leadops -d leadops"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  minio:
+    image: quay.io/minio/minio:RELEASE.2024-09-22T00-33-43Z
+    container_name: leadops-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/minio/health/live || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    volumes:
+      - miniodata:/data
+
+  # 一次性服务：创建桶 + 可选上传 ./seed/Demo.xlsx
+  # 启动：docker compose --profile setup up createbuckets
+  createbuckets:
+    image: quay.io/minio/mc:RELEASE.2024-09-16T17-43-14Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    profiles: ["setup"]
+    volumes:
+      - ./seed:/seed:ro
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin;
+      mc mb -p local/leadops-raw || true;
+      if [ -f /seed/Demo.xlsx ]; then
+        mc cp /seed/Demo.xlsx local/leadops-raw/huji/2026/10/01/Demo.xlsx;
+        echo '>>> uploaded Demo.xlsx to leadops-raw/huji/2026/10/01/';
+      else
+        echo '>>> no ./seed/Demo.xlsx found, skip upload';
+        echo '>>> 把你的 Demo.xlsx 放到 web/apps/ingest-service/seed/Demo.xlsx 后再跑一次本 profile';
+      fi;
+      exit 0;
+      "
+
+volumes:
+  pgdata:
+  miniodata:

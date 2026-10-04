@@ -1,0 +1,11 @@
+/* 客户表格：强制单行、超出省略，防止因为长地址/身份证/批次号撑开行高 */
+.customer-table-nowrap .ant-table-thead > tr > th,
+.customer-table-nowrap .ant-table-tbody > tr > td {
+  white-space: nowrap !important;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.customer-table-nowrap .ant-table-tbody > tr > td .ant-space {
+  flex-wrap: nowrap;
+}

@@ -1,0 +1,13 @@
+{
+  "name": "@leadops/eslint-config",
+  "version": "0.0.0",
+  "private": true,
+  "main": "index.cjs",
+  "dependencies": {
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "eslint-config-prettier": "^9.0.0",
+    "eslint-plugin-react": "^7.0.0",
+    "eslint-plugin-react-hooks": "^4.6.0"
+  }
+}

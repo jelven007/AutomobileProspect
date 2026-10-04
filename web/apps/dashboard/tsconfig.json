@@ -1,0 +1,11 @@
+{
+  "extends": "@leadops/tsconfig/react.json",
+  "compilerOptions": {
+    "plugins": [{ "name": "next" }],
+    "jsx": "preserve",
+    "incremental": true,
+    "moduleResolution": "Bundler"
+  },
+  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx"],
+  "exclude": ["node_modules"]
+}
