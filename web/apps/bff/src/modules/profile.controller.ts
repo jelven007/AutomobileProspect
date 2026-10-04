@@ -1,7 +1,9 @@
 import { Controller, Get, Param } from '@nestjs/common';
 import type { Profile } from '@leadops/types';
+import { Roles } from '../common/auth';
 
 @Controller('profile')
+@Roles('admin', 'operator', 'viewer')
 export class ProfileController {
   @Get(':oneId')
   async getProfile(@Param('oneId') oneId: string): Promise<Profile> {

@@ -14,11 +14,11 @@ async function fetchOverview() {
       { channel: '其他', value: 6 },
     ],
     hotCities: [
-      { city: '上海', intent: 'HIGH' as const, value: 23480 },
-      { city: '北京', intent: 'HIGH' as const, value: 19872 },
-      { city: '深圳', intent: 'MEDIUM' as const, value: 15230 },
-      { city: '广州', intent: 'MEDIUM' as const, value: 13891 },
-      { city: '杭州', intent: 'MEDIUM' as const, value: 11204 },
+      { city: '上海', intent: 'L5' as const, value: 23480 },
+      { city: '北京', intent: 'L5' as const, value: 19872 },
+      { city: '深圳', intent: 'L4' as const, value: 15230 },
+      { city: '广州', intent: 'L4' as const, value: 13891 },
+      { city: '杭州', intent: 'L3' as const, value: 11204 },
     ],
   };
 }

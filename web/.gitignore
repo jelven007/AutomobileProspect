@@ -34,8 +34,9 @@ pnpm-debug.log*
 .turbo
 .cache
 .eslintcache
+.data
+**/.data
 
 # ingest-service 本地联调产物
 apps/ingest-service/seed/*.xlsx
 apps/ingest-service/seed/*.xls
-

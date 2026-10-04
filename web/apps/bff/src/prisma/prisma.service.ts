@@ -15,30 +15,20 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
 
   async onModuleInit(): Promise<void> {
     await this.$connect();
-    await this.ensureCurrentMonthPartition();
+    await this.ensureCustomerPartitions();
   }
 
   async onModuleDestroy(): Promise<void> {
     await this.$disconnect();
   }
 
-  /** 确保当月分区存在（跨年或新环境下的兜底）。 */
-  async ensureCurrentMonthPartition(): Promise<void> {
-    const now = new Date();
-    const y = now.getUTCFullYear();
-    const m = now.getUTCMonth() + 1;
-    const nextY = m === 12 ? y + 1 : y;
-    const nextM = m === 12 ? 1 : m + 1;
-    const from = `${y}-${String(m).padStart(2, '0')}-01`;
-    const to = `${nextY}-${String(nextM).padStart(2, '0')}-01`;
-    const partName = `customer_p${y}_${String(m).padStart(2, '0')}`;
+  /** 预建上月、当月及未来三个月分区，数据库函数会兼容旧命名分区。 */
+  async ensureCustomerPartitions(): Promise<void> {
     try {
-      await this.$executeRawUnsafe(
-        `CREATE TABLE IF NOT EXISTS ${partName} PARTITION OF customer FOR VALUES FROM ('${from}') TO ('${to}')`,
-      );
+      await this.$executeRaw`SELECT ensure_customer_partitions(3)`;
     } catch (e) {
-      // 已有同范围分区（001_init.sql 预建的 customer_pNN）时 CREATE 会撞范围冲突，不致命
-      this.logger.warn(`ensure partition ${partName} failed (likely exists): ${(e as Error).message}`);
+      this.logger.error(`ensure customer partitions failed: ${(e as Error).message}`);
+      throw e;
     }
   }
 }

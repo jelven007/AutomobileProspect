@@ -3,7 +3,7 @@
 # 作用：
 #   1. docker compose up postgres + minio
 #   2. 等 PG + MinIO 健康
-#   3. 跑 migrations/001_init.sql
+#   3. 按顺序跑全部 migrations/*.sql
 #   4. 建 MinIO bucket + 上传 ./seed/Demo.xlsx 到 huji/2026/10/01/（如存在）
 #   5. 提示下一步命令
 
@@ -47,10 +47,12 @@ for i in $(seq 1 30); do
   [[ $i -eq 30 ]] && die "MinIO 启动超时"
 done
 
-info "执行 migrations/001_init.sql ..."
-docker compose exec -T postgres psql -U leadops -d leadops \
-  -v ON_ERROR_STOP=1 < migrations/001_init.sql \
-  || die "DDL 执行失败，看上面日志。若是 uk_customer_huji 唯一索引失败，是 PG 分区表的全局唯一约束限制，参考 docs/11_一期实施/开发阶段TODO.md 风险小节"
+for migration in migrations/*.sql; do
+  info "执行 ${migration} ..."
+  docker compose exec -T postgres psql -U leadops -d leadops \
+    -v ON_ERROR_STOP=1 < "$migration" \
+    || die "DDL 执行失败：${migration}"
+done
 
 info "DDL 执行完成"
 

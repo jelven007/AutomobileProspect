@@ -13,7 +13,15 @@ const STATUS_COLOR: Record<IngestJob['status'], string> = {
 
 export default function IngestJobsPage() {
   const qc = useQueryClient();
-  const { data, isLoading } = useQuery({ queryKey: ['ingest-jobs'], queryFn: () => api.ingestJobs.list() });
+  const { data, isLoading } = useQuery({
+    queryKey: ['ingest-jobs'],
+    queryFn: () => api.ingestJobs.list(),
+    refetchInterval: (query) => (
+      query.state.data?.some((job) => job.status === 'RUNNING' || job.status === 'PENDING')
+        ? 2000
+        : false
+    ),
+  });
 
   const retry = useMutation({
     mutationFn: (jobId: string) => api.ingestJobs.retry(jobId),
@@ -32,7 +40,12 @@ export default function IngestJobsPage() {
         pagination={false}
         columns={[
           { title: 'Job ID', dataIndex: 'job_id' },
-          { title: '来源', render: (_: unknown, j: IngestJob) => `${j.source_bucket}/${j.source_prefix}` },
+          {
+            title: '来源',
+            render: (_: unknown, j: IngestJob) => (
+              j.file_name ?? [j.source_bucket, j.source_prefix].filter(Boolean).join('/') ?? '-'
+            ),
+          },
           {
             title: '状态',
             dataIndex: 'status',
@@ -40,13 +53,23 @@ export default function IngestJobsPage() {
           },
           { title: '总行数', dataIndex: 'total_rows' },
           { title: '成功', dataIndex: 'success_rows' },
+          { title: '新增', dataIndex: 'inserted_rows' },
+          { title: '更新', dataIndex: 'updated_rows' },
           { title: '跳过', dataIndex: 'skipped_rows' },
+          { title: 'Checkpoint', dataIndex: 'checkpoint_row' },
           { title: '开始', dataIndex: 'started_at' },
           { title: '结束', dataIndex: 'finished_at' },
           {
             title: '操作',
             render: (_: unknown, j: IngestJob) => (
-              <Button size="small" onClick={() => retry.mutate(j.job_id)}>重跑</Button>
+              <Button
+                size="small"
+                disabled={j.status !== 'FAILED'}
+                loading={retry.isPending && retry.variables === j.job_id}
+                onClick={() => retry.mutate(j.job_id)}
+              >
+                重跑
+              </Button>
             ),
           },
         ]}

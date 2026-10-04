@@ -2,25 +2,37 @@
   "name": "@leadops/ingest-service",
   "version": "0.0.1",
   "private": true,
-  "main": "src/index.ts",
-  "types": "src/index.ts",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
   "scripts": {
     "dev": "tsx watch src/cli.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/cli.js",
+    "db:migrate": "psql \"$PG_URL\" -v ON_ERROR_STOP=1 -f migrations/001_init.sql -f migrations/002_reliability.sql -f migrations/003_expand_phone.sql -f migrations/004_id_card_identity.sql",
     "ingest:run": "tsx src/cli.ts run",
     "ingest:ls": "tsx src/cli.ts ls",
+    "region:audit": "tsx scripts/audit-region-coverage.ts",
+    "region:update": "pnpm update --latest @cndiv/source-history china-division",
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.600.0",
+    "@cndiv/source-history": "0.2.1",
     "china-division": "^2.7.0",
     "exceljs": "^4.4.0",
     "pg": "^8.11.5",
     "pino": "^9.1.0",
+    "saxes": "^6.0.0",
     "ulid": "^2.3.0",
+    "unzipper": "0.10.14",
     "yaml": "^2.4.5"
   },
   "devDependencies": {
@@ -28,6 +40,7 @@
     "@leadops/tsconfig": "workspace:*",
     "@types/node": "^20.11.0",
     "@types/pg": "^8.11.5",
+    "@types/unzipper": "^0.10.11",
     "tsx": "^4.7.2",
     "typescript": "^5.3.3",
     "vitest": "^1.5.0"

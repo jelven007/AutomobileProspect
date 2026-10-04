@@ -7,6 +7,26 @@ import { api } from '../api';
 
 const { Dragger } = Upload;
 const { Paragraph, Text } = Typography;
+const MAX_IMPORT_FILES = 30;
+
+interface BatchImportResult {
+  uid: string;
+  fileName: string;
+  status: 'success' | 'failed';
+  report?: CustomerImportReport;
+  error?: string;
+}
+
+function formatImportError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.includes('xlsx_archive_corrupted')) {
+    return 'Excel 文件压缩数据已损坏，请重新获取原文件，或用 Excel 打开后另存为新的 .xlsx 文件';
+  }
+  if (message.includes('xlsx_worksheet_missing')) {
+    return 'Excel 文件中未找到可导入的工作表';
+  }
+  return message;
+}
 
 export function CustomerImportModal({
   open,
@@ -17,75 +37,118 @@ export function CustomerImportModal({
   onCancel: () => void;
   onImported: () => void;
 }) {
-  const [file, setFile] = useState<File | null>(null);
+  const [files, setFiles] = useState<UploadFile[]>([]);
   const [uploading, setUploading] = useState(false);
   const [percent, setPercent] = useState(0);
+  const [currentFileIndex, setCurrentFileIndex] = useState(-1);
+  const [results, setResults] = useState<BatchImportResult[]>([]);
   const [report, setReport] = useState<CustomerImportReport | null>(null);
   const { message, notification } = App.useApp();
 
   const reset = () => {
-    setFile(null);
+    setFiles([]);
     setUploading(false);
     setPercent(0);
+    setCurrentFileIndex(-1);
+    setResults([]);
     setReport(null);
   };
 
   const handleUpload = async () => {
-    if (!file) return;
+    const selectedFiles = files.flatMap((item) => (
+      item.originFileObj ? [item.originFileObj as File] : []
+    ));
+    if (selectedFiles.length === 0) return;
     setUploading(true);
     setPercent(0);
+    setCurrentFileIndex(0);
+    setResults([]);
     setReport(null);
-    try {
-      const r = await api.customer.import(file, (loaded, total) => {
-        setPercent(total ? Math.round((loaded / total) * 100) : 0);
+    const nextResults: BatchImportResult[] = [];
+    let firstSuccessfulReport: CustomerImportReport | null = null;
+
+    for (let index = 0; index < selectedFiles.length; index += 1) {
+      const file = selectedFiles[index];
+      setCurrentFileIndex(index);
+      try {
+        const nextReport = await api.customer.import(file, (loaded, total) => {
+          const fileProgress = total ? loaded / total : 0;
+          setPercent(Math.round(((index + fileProgress) / selectedFiles.length) * 100));
+        });
+        const result: BatchImportResult = {
+          uid: files[index]?.uid ?? `${index}`,
+          fileName: file.name,
+          status: 'success',
+          report: nextReport,
+        };
+        nextResults.push(result);
+        if (!firstSuccessfulReport) firstSuccessfulReport = nextReport;
+      } catch (error) {
+        nextResults.push({
+          uid: files[index]?.uid ?? `${index}`,
+          fileName: file.name,
+          status: 'failed',
+          error: formatImportError(error),
+        });
+      }
+      setResults([...nextResults]);
+      setPercent(Math.round(((index + 1) / selectedFiles.length) * 100));
+    }
+
+    const successCount = nextResults.filter((item) => item.status === 'success').length;
+    const failedCount = nextResults.length - successCount;
+    setReport(firstSuccessfulReport);
+    setUploading(false);
+    setCurrentFileIndex(-1);
+    if (successCount > 0) onImported();
+
+    const description = `成功 ${successCount} 个，失败 ${failedCount} 个，共 ${nextResults.length} 个文件`;
+    if (failedCount > 0) {
+      message.warning(`批量导入完成：${description}`);
+      notification.warning({
+        message: '批量导入完成（部分失败）',
+        description,
+        placement: 'topRight',
+        duration: 6,
       });
-      setReport(r);
-      const written = r.written_rows ?? r.success_rows;
-      const hasIssue = (r.skipped_rows ?? 0) > 0 || (r.conflict_warnings?.length ?? 0) > 0;
-      message.success(`导入完成：新增 ${r.inserted_rows ?? 0}，合并 ${r.updated_rows ?? 0}，跳过 ${r.skipped_rows}`, 3);
-      notification[hasIssue ? 'warning' : 'success']({
-        message: hasIssue ? 'Excel 导入完成（含告警）' : 'Excel 导入成功',
-        description: (
-          <>
-            文件 <Text code>{r.file_name}</Text> 共 <b>{r.total_rows}</b> 行，
-            实际写入 <b style={{ color: '#52c41a' }}>{written}</b> 条（
-            新增 <b>{r.inserted_rows ?? 0}</b>，合并 <b>{r.updated_rows ?? 0}</b>）
-            {r.duplicate_rows ? <>，文件内去重 <b>{r.duplicate_rows}</b> 条</> : null}
-            {r.skipped_rows ? <>，跳过 <b style={{ color: '#faad14' }}>{r.skipped_rows}</b> 条</> : null}
-            {r.conflict_warnings?.length
-              ? <>，身份证冲突 <b style={{ color: '#faad14' }}>{r.conflict_warnings.length}</b> 条</>
-              : null}
-            。耗时 {(r.elapsed_ms / 1000).toFixed(2)}s
-          </>
-        ),
+    } else {
+      message.success(`批量导入完成：${description}`, 3);
+      notification.success({
+        message: '批量导入成功',
+        description,
         placement: 'topRight',
         duration: 5,
       });
-      onImported();
-    } catch (e) {
-      message.error((e as Error).message);
-      notification.error({
-        message: 'Excel 导入失败',
-        description: (e as Error).message,
-        placement: 'topRight',
-      });
-    } finally {
-      setUploading(false);
     }
   };
+
+  const importFinished = results.length > 0 && !uploading;
+  const successfulResults = results.filter((item) => item.report);
+  const totalWritten = successfulResults.reduce(
+    (sum, item) => sum + (item.report?.written_rows ?? item.report?.success_rows ?? 0),
+    0,
+  );
 
   return (
     <Modal
       open={open}
-      title="批量导入客户 xlsx"
+      title={`批量导入客户 xlsx（最多 ${MAX_IMPORT_FILES} 个）`}
       width={720}
       destroyOnClose
+      closable={!uploading}
+      maskClosable={!uploading}
       onCancel={() => { reset(); onCancel(); }}
       footer={[
-        <Button key="close" onClick={() => { reset(); onCancel(); }}>关闭</Button>,
-        <Button key="again" disabled={!report} onClick={reset}>再传一个</Button>,
-        <Button key="ok" type="primary" loading={uploading} disabled={!file || !!report} onClick={handleUpload}>
-          开始导入
+        <Button key="close" disabled={uploading} onClick={() => { reset(); onCancel(); }}>关闭</Button>,
+        <Button key="again" disabled={!importFinished} onClick={reset}>再传一批</Button>,
+        <Button
+          key="ok"
+          type="primary"
+          loading={uploading}
+          disabled={files.length === 0 || importFinished}
+          onClick={handleUpload}
+        >
+          开始导入（{files.length}）
         </Button>,
       ]}
     >
@@ -99,33 +162,38 @@ export function CustomerImportModal({
             <ul style={{ margin: 0, paddingLeft: 20 }}>
               <li><b>动态列识别</b>：基于 Excel 第 1 行表头名字自动匹配字段（支持手机号/移动电话/联系电话、地址/详细地址/现住址 等多种别名），列顺序不一致也能正确入库</li>
               <li>自动丢弃「所属户籍站」「编码1/2…」等噪声列；「居住地址」与「地址」同时出现时优先后者</li>
-              <li>编码编号自动去除「2016户籍统计」前缀仅保留数字；<b>非必填</b>，缺失时按匿名记录入库</li>
-              <li>姓名为必填；编码编号非数字的行会被跳过并留痕</li>
-              <li><b>跨批次去重</b>：按 编码编号 → 身份证 → (姓名+手机号) 顺序匹配，命中则合并（空值不覆盖已有数据），未命中则新增</li>
-              <li>编码编号不同但身份证相同的行视为疑似冲突，不丢弃，仅在导入报告中告警</li>
+              <li>编码编号仅作为普通展示字段，非必填，不参与唯一性判断</li>
+              <li>姓名和身份证为必填；缺失身份证或编码编号非数字的行会被跳过并留痕</li>
+              <li><b>跨批次去重</b>：仅按身份证匹配，命中则合并（空值不覆盖已有数据）；同一身份证始终只保留一条客户记录</li>
               <li><b>身份证派生</b>：前 2 位 → 省份；前 4 位 → 城市；前 6 位 → 区县；7–14 位 → 出生日期；第 17 位 → 性别（Excel 原列有值时不覆盖；支持 15 位老身份证自动补 18 位）</li>
+              <li>身份证中的非法日期会向前修正到最近合法日期并重新计算校验位，例如 2 月 30 日修正为当月最后一天</li>
               <li>身份证、手机号均以<b>明文</b>存储（一期不脱敏）</li>
             </ul>
           </Paragraph>
         }
       />
 
-      {!report && (
+      {!importFinished && (
         <Dragger
           accept=".xlsx"
-          multiple={false}
-          maxCount={1}
+          multiple
+          maxCount={MAX_IMPORT_FILES}
+          disabled={uploading}
           beforeUpload={(f) => {
-            setFile(f);
+            if (!f.name.toLowerCase().endsWith('.xlsx')) {
+              message.error(`仅支持 xlsx 文件：${f.name}`);
+              return Upload.LIST_IGNORE;
+            }
             return false;
           }}
-          onRemove={() => setFile(null)}
-          fileList={file ? ([{ uid: '1', name: file.name, status: 'done' } as UploadFile]) : []}
+          onChange={({ fileList }) => setFiles(fileList.slice(0, MAX_IMPORT_FILES))}
+          onRemove={() => !uploading}
+          fileList={files}
         >
           <p className="ant-upload-drag-icon"><InboxOutlined /></p>
-          <p className="ant-upload-text">点击或拖拽 xlsx 文件到此处</p>
+          <p className="ant-upload-text">点击或拖拽 xlsx 文件到此处，单次最多 {MAX_IMPORT_FILES} 个</p>
           <p className="ant-upload-hint">
-            单文件 ≤ 512MB；200MB 级别文件预计清洗 3–10 分钟，服务端流式处理不占用浏览器内存，请耐心等待不要刷新页面。
+            单文件 ≤ 512MB；文件将按列表顺序逐个上传并导入，单个失败不会中断后续文件，请耐心等待不要刷新页面。
           </p>
         </Dragger>
       )}
@@ -134,10 +202,62 @@ export function CustomerImportModal({
         <div style={{ marginTop: 16 }}>
           <Progress percent={percent} status={percent === 100 ? 'active' : 'normal'} />
           <Text type="secondary">
-            {percent < 100
-              ? '上传中，上传完成后服务端会流式清洗与落库，结果将在此展示…'
-              : '上传完成，服务端正在流式清洗与落库（大文件可能需要数分钟，期间进度条会保持在 100%，请勿关闭页面）…'}
+            正在处理第 {currentFileIndex + 1}/{files.length} 个文件：
+            {files[currentFileIndex]?.name ?? '-'}。上传完成后服务端会继续流式清洗与落库。
           </Text>
+        </div>
+      )}
+
+      {results.length > 0 && (
+        <div style={{ marginTop: 16 }}>
+          {importFinished && (
+            <Alert
+              type={results.some((item) => item.status === 'failed') ? 'warning' : 'success'}
+              showIcon
+              style={{ marginBottom: 12 }}
+              message={`批量导入完成：成功 ${successfulResults.length} 个，失败 ${results.length - successfulResults.length} 个`}
+              description={`所有成功文件共写入 ${totalWritten} 条客户数据。点击“查看详情”可检查单个文件的清洗结果。`}
+            />
+          )}
+          <Table
+            size="small"
+            rowKey="uid"
+            dataSource={results}
+            pagination={{ pageSize: 10 }}
+            columns={[
+              { title: '文件', dataIndex: 'fileName', ellipsis: true },
+              {
+                title: '状态',
+                dataIndex: 'status',
+                width: 80,
+                render: (status: BatchImportResult['status']) => (
+                  <Text type={status === 'success' ? 'success' : 'danger'}>
+                    {status === 'success' ? '成功' : '失败'}
+                  </Text>
+                ),
+              },
+              {
+                title: '写入',
+                width: 90,
+                render: (_: unknown, item: BatchImportResult) => (
+                  item.report?.written_rows ?? item.report?.success_rows ?? '-'
+                ),
+              },
+              {
+                title: '跳过',
+                width: 90,
+                render: (_: unknown, item: BatchImportResult) => item.report?.skipped_rows ?? '-',
+              },
+              {
+                title: '结果',
+                render: (_: unknown, item: BatchImportResult) => (
+                  item.report
+                    ? <Button type="link" size="small" onClick={() => setReport(item.report ?? null)}>查看详情</Button>
+                    : <Text type="danger">{item.error}</Text>
+                ),
+              },
+            ]}
+          />
         </div>
       )}
 
@@ -166,7 +286,7 @@ export function CustomerImportModal({
           <Paragraph>
             总行数 <Text strong>{report.total_rows}</Text>　
             清洗成功 <Text strong style={{ color: '#52c41a' }}>{report.success_rows}</Text>　
-            文件内去重 <Text strong style={{ color: '#1677ff' }}>{report.duplicate_rows ?? 0}</Text>　
+            身份证去重 <Text strong style={{ color: '#1677ff' }}>{report.duplicate_rows ?? 0}</Text>　
             新增入库 <Text strong style={{ color: '#52c41a' }}>{report.inserted_rows ?? 0}</Text>　
             合并到已有 <Text strong style={{ color: '#1677ff' }}>{report.updated_rows ?? 0}</Text>　
             实际写入 <Text strong style={{ color: '#13c2c2' }}>{report.written_rows ?? report.success_rows}</Text>　
@@ -245,6 +365,7 @@ export function CustomerImportModal({
                       {k === 'id_card_district_unknown' && <>（身份证前 6 位未匹配到区县，可能是生僻码，可在 configs/gb2260.json 的 districts 补充）</>}
                       {k === 'id_card_city_unknown' && <>（身份证前 4 位未匹配到城市）</>}
                       {k === 'id_card_province_unknown' && <>（身份证前 2 位未匹配到省份）</>}
+                      {k === 'id_card_birth_date_corrected' && <>（身份证中的非法日期已向前修正，并重新计算校验位）</>}
                       {k === 'id_card_checksum_invalid' && <>（身份证校验位失败，仍已入库）</>}
                     </li>
                   ))}

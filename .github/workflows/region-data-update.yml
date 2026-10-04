@@ -1,0 +1,40 @@
+name: Update administrative division data
+
+on:
+  schedule:
+    - cron: '17 2 1 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.0.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @leadops/ingest-service region:update
+      - run: pnpm --filter @leadops/ingest-service test
+      - run: pnpm --filter @leadops/ingest-service typecheck
+      - uses: peter-evans/create-pull-request@v7
+        with:
+          branch: automation/region-data-update
+          delete-branch: true
+          commit-message: 'chore(data): update administrative division sources'
+          title: 'chore(data): update administrative division sources'
+          body: |
+            Automated monthly update of current and historical GB/T 2260 data sources.
+            Tests and TypeScript checks passed before this pull request was created.

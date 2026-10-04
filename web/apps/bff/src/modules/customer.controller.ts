@@ -3,39 +3,91 @@ import {
   Controller,
   Delete,
   Get,
+  HttpException,
+  HttpStatus,
   Inject,
   Param,
   Post,
   Put,
   Query,
+  Req,
   Res,
-  HttpException,
-  HttpStatus,
 } from '@nestjs/common';
+import { createReadStream } from 'node:fs';
 import type { FastifyReply } from 'fastify';
-import ExcelJS from 'exceljs';
-import JSZip from 'jszip';
 import { ulid } from 'ulid';
-import type { Customer, CustomerListResult, IngestJob } from '@leadops/types';
+import type {
+  Customer,
+  CustomerListQuery,
+  CustomerListResult,
+  ExportJob,
+  IngestJob,
+} from '@leadops/types';
 import type { Prisma } from '@prisma/client';
-import { parseIdCard, sanitizeIdCard, expand15To18 } from '@leadops/ingest-service';
+import { normalizeIdCardForStorage, parseIdCard } from '@leadops/ingest-service';
+import { type AuthUser, Roles } from '../common/auth';
 import { PrismaService } from '../prisma/prisma.service';
-import { toCustomer, deriveIngestMonth } from './customer.service';
+import { CustomerExportService } from './customer-export.service';
+import { CustomerImportService } from './customer-import.service';
+import { deriveIngestMonth, toCustomer } from './customer.service';
 
 interface CreateDto extends Partial<Omit<Customer, 'customer_id' | 'version' | 'is_deleted' | 'created_at' | 'updated_at'>> {
   name: string;
-  huji_no?: string;
 }
+
 interface UpdateDto extends Partial<Customer> {
   version: number;
 }
+
 interface BatchDeleteDto {
   ids: string[];
 }
 
+interface RequestContext {
+  user?: AuthUser;
+  headers: Record<string, string | string[] | undefined>;
+}
+
+function actorOf(request: RequestContext): string {
+  return request.user?.sub ?? 'unknown';
+}
+
+function requestIdOf(request: RequestContext): string | undefined {
+  const value = request.headers['x-request-id'];
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function jsonValue(value: unknown): Prisma.InputJsonValue {
+  return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
+}
+
+function normalizeIdCard(value: unknown): string {
+  return normalizeIdCardForStorage(value).value;
+}
+
+function customerWhere(query: CustomerListQuery): Prisma.CustomerWhereInput {
+  const where: Prisma.CustomerWhereInput = { is_deleted: false };
+  if (query.q) {
+    where.OR = [
+      { name: { contains: query.q } },
+      { huji_no: { contains: query.q } },
+    ];
+  }
+  if (query.address) where.address = { contains: query.address };
+  if (query.province) where.province = { contains: query.province };
+  if (query.city) where.city = { contains: query.city };
+  if (query.district) where.district = { contains: query.district };
+  if (query.gender) where.gender = query.gender;
+  return where;
+}
+
 @Controller('customer')
+@Roles('admin', 'operator', 'viewer')
 export class CustomerController {
-  constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {}
+  constructor(
+    @Inject(PrismaService) private readonly prisma: PrismaService,
+    @Inject(CustomerExportService) private readonly exports: CustomerExportService,
+  ) {}
 
   @Get()
   async list(
@@ -46,29 +98,16 @@ export class CustomerController {
     @Query('district') district?: string,
     @Query('gender') gender?: 'M' | 'F' | 'U',
     @Query('cursor') cursor?: string,
-    @Query('limit') limitStr?: string,
+    @Query('limit') limitValue?: string,
   ): Promise<CustomerListResult> {
-    const limit = Math.min(Math.max(Number(limitStr ?? 20), 1), 200);
-    const where: Prisma.CustomerWhereInput = { is_deleted: false };
-    if (q) {
-      where.OR = [
-        { name: { contains: q } },
-        { huji_no: { contains: q } },
-      ];
-    }
-    if (address) where.address = { contains: address };
-    if (province) where.province = { contains: province };
-    if (city) where.city = { contains: city };
-    if (district) where.district = { contains: district };
-    if (gender) where.gender = gender;
-
-    // cursor 使用 customer_id 字典序倒序，与原 Mock 版本保持一致
-    const andCursor: Prisma.CustomerWhereInput[] = [];
-    if (cursor) andCursor.push({ customer_id: { lt: cursor } });
-    const finalWhere: Prisma.CustomerWhereInput = andCursor.length
-      ? { AND: [where, ...andCursor] }
+    const parsedLimit = Number(limitValue ?? 20);
+    const limit = Number.isFinite(parsedLimit)
+      ? Math.min(Math.max(parsedLimit, 1), 200)
+      : 20;
+    const where = customerWhere({ q, address, province, city, district, gender });
+    const finalWhere: Prisma.CustomerWhereInput = cursor
+      ? { AND: [where, { customer_id: { lt: cursor } }] }
       : where;
-
     const [rows, total] = await Promise.all([
       this.prisma.customer.findMany({
         where: finalWhere,
@@ -79,19 +118,17 @@ export class CustomerController {
     ]);
     const hasMore = rows.length > limit;
     const page = hasMore ? rows.slice(0, limit) : rows;
-    const next = hasMore ? page[page.length - 1]?.customer_id : undefined;
     return {
-      items: page.map((r) => toCustomer(r as unknown as Record<string, unknown>)),
-      next_cursor: next,
+      items: page.map((row) => toCustomer(row as unknown as Record<string, unknown>)),
+      next_cursor: hasMore ? page.at(-1)?.customer_id : undefined,
       has_more: hasMore,
       total,
     };
   }
 
-  /** 聚合可选筛选项（province / city / district）供前端下拉。 */
   @Get('facets')
   async facets(): Promise<{ province: string[]; city: string[]; district: string[] }> {
-    const [p, c, d] = await Promise.all([
+    const [provinces, cities, districts] = await Promise.all([
       this.prisma.customer.groupBy({
         by: ['province'],
         where: { is_deleted: false, province: { not: null } },
@@ -105,270 +142,399 @@ export class CustomerController {
         where: { is_deleted: false, district: { not: null } },
       }),
     ]);
-    const pick = (rows: Array<Record<string, unknown>>, k: string) =>
-      rows
-        .map((r) => r[k])
-        .filter((v): v is string => typeof v === 'string' && v.length > 0)
-        .sort((a, b) => a.localeCompare(b, 'zh'));
+    const values = (rows: Array<Record<string, unknown>>, key: string) => rows
+      .map((row) => row[key])
+      .filter((value): value is string => typeof value === 'string' && value.length > 0)
+      .sort((left, right) => left.localeCompare(right, 'zh'));
     return {
-      province: pick(p as never, 'province'),
-      city: pick(c as never, 'city'),
-      district: pick(d as never, 'district'),
+      province: values(provinces as never, 'province'),
+      city: values(cities as never, 'city'),
+      district: values(districts as never, 'district'),
     };
   }
 
-  /**
-   * 按筛选条件导出全量数据：按 (province, city) 分组生成多个 xlsx，打包为 zip。
-   * 每个 xlsx 文件名：`${province}-${city}-${count}条.xlsx`。
-   * 跳过 EnvelopeInterceptor：直接写 Fastify 原生响应。
-   */
-  @Get('export')
-  async export(
-    @Res() res: FastifyReply,
-    @Query('q') q?: string,
-    @Query('address') address?: string,
-    @Query('province') province?: string,
-    @Query('city') city?: string,
-    @Query('district') district?: string,
-    @Query('gender') gender?: 'M' | 'F' | 'U',
+  @Post('exports')
+  @Roles('admin', 'operator')
+  createExport(
+    @Body() query: CustomerListQuery,
+    @Req() request: RequestContext,
+  ): Promise<ExportJob> {
+    const filters = {
+      q: query.q,
+      address: query.address,
+      province: query.province,
+      city: query.city,
+      district: query.district,
+      gender: query.gender,
+    };
+    return this.exports.create(filters, actorOf(request));
+  }
+
+  @Get('exports/:jobId')
+  @Roles('admin', 'operator')
+  async exportStatus(@Param('jobId') jobId: string): Promise<ExportJob> {
+    const job = await this.exports.get(jobId);
+    if (!job) {
+      throw new HttpException({ code: 40401, message: 'not_found' }, HttpStatus.NOT_FOUND);
+    }
+    return job;
+  }
+
+  @Get('exports/:jobId/download')
+  @Roles('admin', 'operator')
+  async downloadExport(
+    @Param('jobId') jobId: string,
+    @Res() reply: FastifyReply,
   ): Promise<void> {
-    const where: Prisma.CustomerWhereInput = { is_deleted: false };
-    if (q) {
-      where.OR = [{ name: { contains: q } }, { huji_no: { contains: q } }];
+    const file = await this.exports.getDownload(jobId);
+    if (!file) {
+      throw new HttpException(
+        { code: 40904, message: 'export_not_ready_or_expired' },
+        HttpStatus.CONFLICT,
+      );
     }
-    if (address) where.address = { contains: address };
-    if (province) where.province = { contains: province };
-    if (city) where.city = { contains: city };
-    if (district) where.district = { contains: district };
-    if (gender) where.gender = gender;
-
-    const items = await this.prisma.customer.findMany({
-      where,
-      orderBy: { customer_id: 'desc' },
-    });
-    const asCustomer = items.map((r) => toCustomer(r as unknown as Record<string, unknown>));
-
-    const groups = new Map<string, { province: string; city: string; rows: Customer[] }>();
-    for (const r of asCustomer) {
-      const p = r.province || '未知省份';
-      const c = r.city || '未知城市';
-      const key = `${p}__${c}`;
-      let g = groups.get(key);
-      if (!g) {
-        g = { province: p, city: c, rows: [] };
-        groups.set(key, g);
-      }
-      g.rows.push(r);
-    }
-
-    const zip = new JSZip();
-    for (const { province: p, city: c, rows } of groups.values()) {
-      const buf = await buildCustomerXlsx(rows);
-      const safeName = `${p}-${c}-${rows.length}条`.replace(/[\\/:*?"<>|]/g, '_');
-      zip.file(`${safeName}.xlsx`, buf);
-    }
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-    const zipBuf = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
-
-    res
+    reply
       .header('Content-Type', 'application/zip')
-      .header('Content-Disposition', `attachment; filename="customers-export-${stamp}.zip"`)
-      .header('X-Export-Groups', String(groups.size))
-      .header('X-Export-Total', String(asCustomer.length))
-      .send(zipBuf);
+      .header('Content-Disposition', `attachment; filename="${file.filename}"`)
+      .send(createReadStream(file.path));
   }
 
   @Get(':id')
   async detail(@Param('id') id: string): Promise<Customer> {
-    const c = await this.prisma.customer.findFirst({
+    const customer = await this.prisma.customer.findFirst({
       where: { customer_id: id, is_deleted: false },
     });
-    if (!c) throw new HttpException({ code: 40401, message: 'not_found' }, HttpStatus.NOT_FOUND);
-    return toCustomer(c as unknown as Record<string, unknown>);
+    if (!customer) {
+      throw new HttpException({ code: 40401, message: 'not_found' }, HttpStatus.NOT_FOUND);
+    }
+    return toCustomer(customer as unknown as Record<string, unknown>);
   }
 
   @Post()
-  async create(@Body() dto: CreateDto): Promise<Customer> {
-    if (!dto.name) {
-      throw new HttpException({ code: 40001, message: 'name required' }, HttpStatus.BAD_REQUEST);
+  @Roles('admin', 'operator')
+  async create(
+    @Body() dto: CreateDto,
+    @Req() request: RequestContext,
+  ): Promise<Customer> {
+    if (!dto.name?.trim()) {
+      throw new HttpException({ code: 40001, message: 'name_required' }, HttpStatus.BAD_REQUEST);
     }
-    if (dto.huji_no && !/^\d+$/.test(dto.huji_no)) {
-      throw new HttpException({ code: 40001, message: 'huji_no must be digits' }, HttpStatus.BAD_REQUEST);
-    }
-    if (dto.huji_no) {
-      const dup = await this.prisma.customer.findFirst({
-        where: { huji_no: dto.huji_no, is_deleted: false },
-      });
-      if (dup) {
-        throw new HttpException({ code: 40901, message: 'huji_no exists' }, HttpStatus.CONFLICT);
-      }
+    const hujiNo = dto.huji_no?.trim() || null;
+    if (hujiNo && !/^\d+$/.test(hujiNo)) {
+      throw new HttpException({ code: 40001, message: 'huji_no_must_be_digits' }, HttpStatus.BAD_REQUEST);
     }
 
-    const clean = sanitizeIdCard(dto.id_card ?? '');
-    const rawIdCard = clean.length === 15 ? (expand15To18(clean) ?? clean) : clean;
-    const info = /^\d{17}[\dX]$/.test(rawIdCard) ? parseIdCard(rawIdCard) : {};
-
-    const id = ulid();
-    const birth = (dto.birth_date ?? info.birth_date)
-      ? new Date((dto.birth_date ?? info.birth_date) as string)
-      : null;
-    const stat = dto.stat_time ? new Date(dto.stat_time) : null;
+    const idCard = normalizeIdCard(dto.id_card);
+    if (!idCard) {
+      throw new HttpException({ code: 40001, message: 'id_card_required' }, HttpStatus.BAD_REQUEST);
+    }
+    const info = /^\d{17}[\dX]$/.test(idCard) ? parseIdCard(idCard) : {};
+    const customerId = ulid();
     const ingestMonth = deriveIngestMonth(dto.stat_time);
-    const created = await this.prisma.customer.create({
-      data: {
-        customer_id: id,
-        huji_no: dto.huji_no ?? '',
-        name: dto.name,
-        gender: dto.gender ?? info.gender ?? null,
-        birth_date: birth,
-        id_card: rawIdCard || null,
-        phone_masked: dto.phone_masked ?? null,
-        address: dto.address ?? null,
-        stat_time: stat,
-        province: dto.province ?? info.province ?? null,
-        city: dto.city ?? info.city ?? null,
-        district: dto.district ?? info.district ?? null,
-        occupation: dto.occupation ?? null,
-        education: dto.education ?? null,
-        marital_status: dto.marital_status ?? null,
-        source_file: null,
-        source_row: null,
-        ingest_batch: 'manual',
-        ingest_month: ingestMonth,
-        version: 1,
-        is_deleted: false,
-      },
+
+    const created = await this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'id-card:' + idCard}, 0))`;
+      const duplicate = await tx.customerIdentity.findUnique({ where: { id_card: idCard } });
+      if (duplicate) {
+        throw new HttpException({ code: 40901, message: 'id_card_exists' }, HttpStatus.CONFLICT);
+      }
+      const row = await tx.customer.create({
+        data: {
+          customer_id: customerId,
+          huji_no: hujiNo,
+          name: dto.name.trim(),
+          gender: dto.gender ?? info.gender ?? null,
+          birth_date: dto.birth_date || info.birth_date
+            ? new Date((dto.birth_date ?? info.birth_date) as string)
+            : null,
+          id_card: idCard || null,
+          phone_masked: dto.phone_masked ?? null,
+          address: dto.address ?? null,
+          stat_time: dto.stat_time ? new Date(dto.stat_time) : null,
+          province: dto.province ?? info.province ?? null,
+          city: dto.city ?? info.city ?? null,
+          district: dto.district ?? info.district ?? null,
+          occupation: dto.occupation ?? null,
+          education: dto.education ?? null,
+          marital_status: dto.marital_status ?? null,
+          ingest_batch: 'manual',
+          ingest_month: ingestMonth,
+        },
+      });
+      await tx.customerIdentity.create({
+        data: { id_card: idCard, customer_id: customerId, ingest_month: ingestMonth },
+      });
+      await tx.auditLog.create({
+        data: {
+          actor: actorOf(request),
+          action: 'customer.create',
+          entity_type: 'customer',
+          entity_id: customerId,
+          after_data: jsonValue(row),
+          request_id: requestIdOf(request),
+        },
+      });
+      return row;
     });
     return toCustomer(created as unknown as Record<string, unknown>);
   }
 
   @Put(':id')
-  async update(@Param('id') id: string, @Body() dto: UpdateDto): Promise<Customer> {
-    const c = await this.prisma.customer.findFirst({
-      where: { customer_id: id, is_deleted: false },
-    });
-    if (!c) throw new HttpException({ code: 40401, message: 'not_found' }, HttpStatus.NOT_FOUND);
-    if (dto.version !== c.version) {
-      throw new HttpException({ code: 40901, message: 'version_conflict' }, HttpStatus.CONFLICT);
+  @Roles('admin', 'operator')
+  async update(
+    @Param('id') id: string,
+    @Body() dto: UpdateDto,
+    @Req() request: RequestContext,
+  ): Promise<Customer> {
+    if (!Number.isInteger(dto.version) || dto.version < 1) {
+      throw new HttpException({ code: 40001, message: 'version_required' }, HttpStatus.BAD_REQUEST);
     }
-    const data: Prisma.CustomerUpdateInput = {
-      version: c.version + 1,
-      updated_at: new Date(),
-    };
-    if (dto.huji_no !== undefined) data.huji_no = dto.huji_no;
-    if (dto.name !== undefined) data.name = dto.name;
-    if (dto.gender !== undefined) data.gender = dto.gender;
-    if (dto.birth_date !== undefined) data.birth_date = dto.birth_date ? new Date(dto.birth_date) : null;
-    if (dto.id_card !== undefined) data.id_card = dto.id_card ?? null;
-    if (dto.phone_masked !== undefined) data.phone_masked = dto.phone_masked ?? null;
-    if (dto.address !== undefined) data.address = dto.address ?? null;
-    if (dto.stat_time !== undefined) data.stat_time = dto.stat_time ? new Date(dto.stat_time) : null;
-    if (dto.province !== undefined) data.province = dto.province ?? null;
-    if (dto.city !== undefined) data.city = dto.city ?? null;
-    if (dto.district !== undefined) data.district = dto.district ?? null;
-    if (dto.occupation !== undefined) data.occupation = dto.occupation ?? null;
-    if (dto.education !== undefined) data.education = dto.education ?? null;
-    if (dto.marital_status !== undefined) data.marital_status = dto.marital_status ?? null;
+    return this.prisma.$transaction(async (tx) => {
+      const existing = await tx.customer.findFirst({
+        where: { customer_id: id, is_deleted: false },
+      });
+      if (!existing) {
+        throw new HttpException({ code: 40401, message: 'not_found' }, HttpStatus.NOT_FOUND);
+      }
+      const data: Prisma.CustomerUncheckedUpdateInput = {
+        version: { increment: 1 },
+        updated_at: new Date(),
+      };
+      if (dto.huji_no !== undefined) {
+        const hujiNo = dto.huji_no?.trim() || null;
+        if (hujiNo && !/^\d+$/.test(hujiNo)) {
+          throw new HttpException(
+            { code: 40001, message: 'huji_no_must_be_digits' },
+            HttpStatus.BAD_REQUEST,
+          );
+        }
+        data.huji_no = hujiNo;
+      }
+      if (dto.name !== undefined) data.name = dto.name;
+      if (dto.gender !== undefined) data.gender = dto.gender;
+      if (dto.birth_date !== undefined) data.birth_date = dto.birth_date ? new Date(dto.birth_date) : null;
+      let nextIdCard = existing.id_card;
+      if (dto.id_card !== undefined) {
+        nextIdCard = normalizeIdCard(dto.id_card);
+        if (!nextIdCard) {
+          throw new HttpException(
+            { code: 40001, message: 'id_card_required' },
+            HttpStatus.BAD_REQUEST,
+          );
+        }
+        data.id_card = nextIdCard;
+      }
+      if (dto.phone_masked !== undefined) data.phone_masked = dto.phone_masked || null;
+      if (dto.address !== undefined) data.address = dto.address || null;
+      if (dto.stat_time !== undefined) data.stat_time = dto.stat_time ? new Date(dto.stat_time) : null;
+      if (dto.province !== undefined) data.province = dto.province || null;
+      if (dto.city !== undefined) data.city = dto.city || null;
+      if (dto.district !== undefined) data.district = dto.district || null;
+      if (dto.occupation !== undefined) data.occupation = dto.occupation || null;
+      if (dto.education !== undefined) data.education = dto.education || null;
+      if (dto.marital_status !== undefined) data.marital_status = dto.marital_status || null;
 
-    const updated = await this.prisma.customer.update({
-      where: {
-        customer_id_ingest_month: {
-          customer_id: c.customer_id,
-          ingest_month: c.ingest_month,
+      const idCardChanged = nextIdCard !== existing.id_card;
+      if (idCardChanged) {
+        const lockKeys = [existing.id_card, nextIdCard]
+          .filter((value): value is string => Boolean(value))
+          .map((value) => `id-card:${value}`)
+          .sort();
+        for (const key of lockKeys) {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`;
+        }
+        const duplicate = await tx.customerIdentity.findUnique({
+          where: { id_card: nextIdCard as string },
+        });
+        if (duplicate && duplicate.customer_id !== id) {
+          throw new HttpException({ code: 40901, message: 'id_card_exists' }, HttpStatus.CONFLICT);
+        }
+      }
+
+      const changed = await tx.customer.updateMany({
+        where: {
+          customer_id: id,
+          ingest_month: existing.ingest_month,
+          version: dto.version,
+          is_deleted: false,
         },
-      },
-      data,
+        data,
+      });
+      if (changed.count !== 1) {
+        throw new HttpException({ code: 40901, message: 'version_conflict' }, HttpStatus.CONFLICT);
+      }
+      if (idCardChanged) {
+        await tx.customerIdentity.deleteMany({ where: { customer_id: id } });
+        await tx.customerIdentity.create({
+          data: {
+            id_card: nextIdCard as string,
+            customer_id: id,
+            ingest_month: existing.ingest_month,
+          },
+        });
+      }
+      const updated = await tx.customer.findUniqueOrThrow({
+        where: {
+          customer_id_ingest_month: {
+            customer_id: id,
+            ingest_month: existing.ingest_month,
+          },
+        },
+      });
+      await tx.auditLog.create({
+        data: {
+          actor: actorOf(request),
+          action: 'customer.update',
+          entity_type: 'customer',
+          entity_id: id,
+          before_data: jsonValue(existing),
+          after_data: jsonValue(updated),
+          request_id: requestIdOf(request),
+        },
+      });
+      return toCustomer(updated as unknown as Record<string, unknown>);
     });
-    return toCustomer(updated as unknown as Record<string, unknown>);
   }
 
-  /** 批量删除（硬删除，一期简化）。 */
   @Post('batch-delete')
-  async batchDelete(@Body() dto: BatchDeleteDto): Promise<{ deleted: number }> {
-    if (!Array.isArray(dto?.ids) || dto.ids.length === 0) {
-      throw new HttpException({ code: 40001, message: 'ids required' }, HttpStatus.BAD_REQUEST);
+  @Roles('admin')
+  async batchDelete(
+    @Body() dto: BatchDeleteDto,
+    @Req() request: RequestContext,
+  ): Promise<{ deleted: number }> {
+    if (!Array.isArray(dto?.ids) || dto.ids.length === 0 || dto.ids.length > 5000) {
+      throw new HttpException({ code: 40001, message: 'ids_required' }, HttpStatus.BAD_REQUEST);
     }
-    const r = await this.prisma.customer.deleteMany({
-      where: { customer_id: { in: dto.ids } },
-    });
-    return { deleted: r.count };
+    return this.softDelete(dto.ids, request, 'customer.batch_delete');
   }
 
-  /** 清空全部数据（含已软删除），一期便捷开关。 */
   @Delete('_all')
-  async removeAll(): Promise<{ deleted: number }> {
-    const r = await this.prisma.customer.deleteMany({});
-    return { deleted: r.count };
+  @Roles('admin')
+  async removeAll(@Req() request: RequestContext): Promise<{ deleted: number }> {
+    return this.prisma.$transaction(async (tx) => {
+      const changed = await tx.customer.updateMany({
+        where: { is_deleted: false },
+        data: { is_deleted: true, version: { increment: 1 }, updated_at: new Date() },
+      });
+      await tx.customerIdentity.deleteMany({});
+      await tx.auditLog.create({
+        data: {
+          actor: actorOf(request),
+          action: 'customer.delete_all',
+          entity_type: 'customer',
+          after_data: jsonValue({ deleted: changed.count }),
+          request_id: requestIdOf(request),
+        },
+      });
+      return { deleted: changed.count };
+    });
   }
 
   @Delete(':id')
-  async remove(@Param('id') id: string): Promise<{ ok: boolean }> {
-    const r = await this.prisma.customer.deleteMany({ where: { customer_id: id } });
-    if (r.count === 0) {
+  @Roles('admin')
+  async remove(
+    @Param('id') id: string,
+    @Req() request: RequestContext,
+  ): Promise<{ ok: boolean }> {
+    const result = await this.softDelete([id], request, 'customer.delete');
+    if (result.deleted === 0) {
       throw new HttpException({ code: 40401, message: 'not_found' }, HttpStatus.NOT_FOUND);
     }
     return { ok: true };
   }
+
+  private async softDelete(
+    ids: string[],
+    request: RequestContext,
+    action: string,
+  ): Promise<{ deleted: number }> {
+    return this.prisma.$transaction(async (tx) => {
+      const rows = await tx.customer.findMany({
+        where: { customer_id: { in: ids }, is_deleted: false },
+      });
+      if (rows.length === 0) return { deleted: 0 };
+      const changed = await tx.customer.updateMany({
+        where: { customer_id: { in: rows.map((row) => row.customer_id) }, is_deleted: false },
+        data: { is_deleted: true, version: { increment: 1 }, updated_at: new Date() },
+      });
+      await tx.customerIdentity.deleteMany({
+        where: { customer_id: { in: rows.map((row) => row.customer_id) } },
+      });
+      await tx.auditLog.create({
+        data: {
+          actor: actorOf(request),
+          action,
+          entity_type: 'customer',
+          entity_id: rows.length === 1 ? rows[0].customer_id : undefined,
+          before_data: jsonValue(rows),
+          after_data: jsonValue({ deleted: changed.count }),
+          request_id: requestIdOf(request),
+        },
+      });
+      return { deleted: changed.count };
+    });
+  }
+}
+
+function serializeIngestJob(job: {
+  job_id: string;
+  source_bucket: string | null;
+  source_prefix: string | null;
+  file_name: string | null;
+  status: string;
+  total_rows: bigint;
+  success_rows: bigint;
+  skipped_rows: bigint;
+  duplicate_rows: bigint;
+  written_rows: bigint;
+  inserted_rows: bigint;
+  updated_rows: bigint;
+  checkpoint_row: bigint;
+  started_at: Date | null;
+  finished_at: Date | null;
+  error: string | null;
+}): IngestJob {
+  return {
+    job_id: job.job_id,
+    source_bucket: job.source_bucket ?? undefined,
+    source_prefix: job.source_prefix ?? undefined,
+    file_name: job.file_name ?? undefined,
+    status: job.status as IngestJob['status'],
+    total_rows: Number(job.total_rows),
+    success_rows: Number(job.success_rows),
+    skipped_rows: Number(job.skipped_rows),
+    duplicate_rows: Number(job.duplicate_rows),
+    written_rows: Number(job.written_rows),
+    inserted_rows: Number(job.inserted_rows),
+    updated_rows: Number(job.updated_rows),
+    checkpoint_row: Number(job.checkpoint_row),
+    started_at: job.started_at?.toISOString(),
+    finished_at: job.finished_at?.toISOString(),
+    error: job.error ?? undefined,
+  };
 }
 
 @Controller('ingest-jobs')
+@Roles('admin', 'operator', 'viewer')
 export class IngestJobController {
-  private jobs: IngestJob[] = [];
+  constructor(
+    @Inject(PrismaService) private readonly prisma: PrismaService,
+    @Inject(CustomerImportService) private readonly imports: CustomerImportService,
+  ) {}
 
   @Get()
-  list(): IngestJob[] {
-    return this.jobs;
+  async list(): Promise<IngestJob[]> {
+    const jobs = await this.prisma.ingestJob.findMany({
+      orderBy: { created_at: 'desc' },
+      take: 100,
+    });
+    return jobs.map(serializeIngestJob);
   }
 
   @Post(':jobId/retry')
-  retry(@Param('jobId') jobId: string) {
-    const j = this.jobs.find((x) => x.job_id === jobId);
-    if (!j) throw new HttpException({ code: 40401, message: 'not_found' }, HttpStatus.NOT_FOUND);
-    j.status = 'PENDING';
-    j.started_at = undefined;
-    j.finished_at = undefined;
+  @Roles('admin', 'operator')
+  async retry(@Param('jobId') jobId: string): Promise<{ ok: boolean }> {
+    await this.imports.retry(jobId);
     return { ok: true };
   }
-}
-
-const EXPORT_COLUMNS: Array<{ header: string; key: keyof Customer; width: number }> = [
-  { header: '编码编号', key: 'huji_no', width: 18 },
-  { header: '姓名', key: 'name', width: 10 },
-  { header: '身份证', key: 'id_card', width: 20 },
-  { header: '出生日期', key: 'birth_date', width: 12 },
-  { header: '性别', key: 'gender', width: 6 },
-  { header: '手机号', key: 'phone_masked', width: 14 },
-  { header: '省份', key: 'province', width: 10 },
-  { header: '城市', key: 'city', width: 10 },
-  { header: '区县', key: 'district', width: 12 },
-  { header: '地址', key: 'address', width: 32 },
-  { header: '职业', key: 'occupation', width: 12 },
-  { header: '学历', key: 'education', width: 10 },
-  { header: '婚姻', key: 'marital_status', width: 8 },
-  { header: '统计时间', key: 'stat_time', width: 12 },
-  { header: '入库批次', key: 'ingest_batch', width: 20 },
-];
-
-async function buildCustomerXlsx(rows: Customer[]): Promise<Buffer> {
-  const wb = new ExcelJS.Workbook();
-  const ws = wb.addWorksheet('customers');
-  ws.columns = EXPORT_COLUMNS.map((c) => ({ header: c.header, key: c.key, width: c.width }));
-  ws.getRow(1).font = { bold: true };
-  for (const r of rows) {
-    const row: Record<string, unknown> = {};
-    for (const c of EXPORT_COLUMNS) {
-      const v = r[c.key];
-      if (c.key === 'gender') {
-        row[c.key] = v === 'M' ? '男' : v === 'F' ? '女' : v ? '未知' : '';
-      } else if (c.key === 'stat_time') {
-        // stat_time 后端存 TIMESTAMPTZ，导出统一按 YYYY-MM-DD 展示（与出生日期一致）
-        row[c.key] = v ? String(v).slice(0, 10) : '';
-      } else {
-        row[c.key] = v ?? '';
-      }
-    }
-    ws.addRow(row);
-  }
-  const buf = await wb.xlsx.writeBuffer();
-  return Buffer.from(buf);
 }

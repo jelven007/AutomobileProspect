@@ -5,6 +5,13 @@
 
 export type Transformer = (value: unknown, ...args: unknown[]) => unknown;
 
+export function isValidCalendarDate(year: number, month: number, day: number): boolean {
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year
+    && date.getUTCMonth() === month - 1
+    && date.getUTCDate() === day;
+}
+
 /** 去除指定前缀，仅保留数字。用于编码编号 "2016户籍统计12345678" → "12345678"。 */
 export const stripPrefixDigits: Transformer = (value, prefix) => {
   if (value == null) return '';
@@ -27,6 +34,7 @@ export const parseDate: Transformer = (value) => {
   if (value == null || value === '') return null;
   const pad = (n: number) => String(n).padStart(2, '0');
   if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return null;
     return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}`;
   }
   const s = String(value).trim();
@@ -40,7 +48,7 @@ export const parseDate: Transformer = (value) => {
     const y = Number(m[1]);
     const mo = Number(m[2]);
     const d = Number(m[3]);
-    if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31) {
+    if (y >= 1800 && y <= 2100 && isValidCalendarDate(y, mo, d)) {
       return `${y}-${pad(mo)}-${pad(d)}`;
     }
   }

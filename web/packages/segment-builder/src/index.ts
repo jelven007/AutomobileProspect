@@ -5,6 +5,7 @@ export function emptyExpr(): SegmentExpr {
 }
 
 export function describe(expr: SegmentExpr): string {
-  if ('field' in expr) return `${expr.field} ${expr.op} ${JSON.stringify(expr.value)}`;
+  if ('tag_id' in expr) return `tag:${expr.tag_id} ${expr.op} ${JSON.stringify(expr.value)}`;
+  if (expr.op === 'NOT') return `NOT (${describe(expr.child)})`;
   return expr.children.map(describe).join(` ${expr.op} `);
 }

@@ -7,6 +7,7 @@
     "build": "nest build",
     "start": "NODE_OPTIONS=\"--max-old-space-size=4096\" node dist/main.js",
     "lint": "eslint src --ext .ts",
+    "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -18,8 +19,9 @@
     "@nestjs/core": "^10.3.0",
     "@nestjs/platform-fastify": "^10.3.0",
     "@prisma/client": "5.22.0",
+    "archiver": "^7.0.1",
     "exceljs": "^4.4.0",
-    "jszip": "^3.10.2",
+    "jose": "^5.9.6",
     "ky": "^1.2.0",
     "prisma": "5.22.0",
     "reflect-metadata": "^0.2.1",
@@ -33,8 +35,10 @@
     "@nestjs/cli": "^10.3.0",
     "@nestjs/schematics": "^10.1.0",
     "@types/node": "^20.11.0",
+    "@types/archiver": "^6.0.3",
     "fastify": "^4.26.0",
     "tsx": "^4.7.2",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "vitest": "^1.5.0"
   }
 }

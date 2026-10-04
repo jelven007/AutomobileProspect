@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: leadops
+          POSTGRES_PASSWORD: leadops
+          POSTGRES_DB: leadops
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U leadops -d leadops"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    defaults:
+      run:
+        working-directory: web
+    env:
+      DATABASE_URL: postgresql://leadops:leadops@localhost:5432/leadops?schema=public
+      PG_URL: postgresql://leadops:leadops@localhost:5432/leadops
+      AUTH_DISABLED: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.0.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @leadops/ingest-service db:migrate
+      - run: pnpm --filter @leadops/bff exec prisma generate
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build

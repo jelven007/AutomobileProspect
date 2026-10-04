@@ -25,6 +25,12 @@ pnpm --filter @leadops/ingest-service ingest:run -- \
 
 **依赖检查**：bootstrap 需要本机已安装 Docker Desktop 且 `docker compose version` 可用。
 
+单独升级已有数据库时，设置 `PG_URL` 后执行：
+
+```bash
+pnpm --filter @leadops/ingest-service db:migrate
+```
+
 **本地服务端口**：
 - PG `localhost:5432`（leadops / leadops / leadops）
 - MinIO API `localhost:9000`、Console `localhost:9001`（minioadmin / minioadmin）
@@ -160,11 +166,30 @@ pnpm --filter @leadops/ingest-service ingest:run -- \
 - **ListObjectsV2 返回空**：确认 `prefix` 以 `/` 结尾；TOS 的 ACL 需要 `tos:ListBucket` 而非 `tos:ListObjects`。
 - **访问性能慢**：桶如果和运行同步服务的 ECS 不在同一 region，建议开启 TOS 的内网 endpoint（如 `https://tos-s3-cn-beijing.ivolces.com`），同 VPC 内走内网不走公网。
 
-## 清洗规则（硬编码在 pipeline 中）
+## 行政区划码持续更新
 
-- 丢弃第 1 / 第 3 / 倒数两列
-- 第 4 列（编码编号）去除 `2016户籍统计` 前缀，仅保留数字
-- 身份证明文入库前派生 `province` / `city` / `district` / `birth_date` / `gender`（见 `src/id-card.ts` + `configs/gb2260.json`），然后脱敏为 `前6+****+后4` 入库
-- 其余字段映射由 `configs/ingest-schema.yaml` 配置
+身份证地址派生使用三层数据：
+
+1. 现行区划：`china-division`
+2. 1980–2020 历史快照：`@cndiv/source-history`
+3. 项目兜底：`configs/gb2260.json`
+
+每月 GitHub Actions 会检查并创建数据源升级 PR。也可手动执行：
+
+```bash
+pnpm --filter @leadops/ingest-service region:update
+pnpm --filter @leadops/ingest-service region:audit -- /absolute/path/to/file.xlsx
+```
+
+`region:audit` 只输出未命中的行政区划代码及计数，不输出身份证、姓名或手机号。升级码表后必须运行测试和真实文件覆盖率审计。
+
+## 清洗规则
+
+- 优先按首行中文表头动态识别列，未识别到任何字段时才回落到 `configs/ingest-schema.yaml` 的固定列号。
+- 编码编号去除 `2016户籍统计` 前缀，仅保留数字；允许为空。
+- 身份证为必填且是唯一合并依据；同一身份证只保留一条，编码编号不参与唯一性判断。
+- 身份证明文入库前派生 `province` / `city` / `district` / `birth_date` / `gender`。
+- 身份证和手机号按当前一期决策明文存储；生产环境应另行配置字段级加密和访问审计。
+- 超过数据库字段容量的值按行记为 `value_too_long:<field>:<limit>`，不会回滚整批。
 
 详见 [数据同步与清洗规则](../../../docs/11_一期实施/数据同步与清洗规则.md)。

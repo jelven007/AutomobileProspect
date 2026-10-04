@@ -1,4 +1,4 @@
-import ky, { type KyInstance } from 'ky';
+import ky, { HTTPError, type KyInstance } from 'ky';
 import type {
   ApiEnvelope,
   Profile,
@@ -12,6 +12,7 @@ import type {
   CustomerFacets,
   CustomerImportReport,
   IngestJob,
+  ExportJob,
 } from '@leadops/types';
 
 export interface ClientOptions {
@@ -19,14 +20,21 @@ export interface ClientOptions {
   getToken?: () => string | undefined;
 }
 
+function normalizeBaseUrl(input: string): string {
+  const origin = typeof window === 'undefined' ? 'http://localhost' : window.location.origin;
+  const url = new URL(input, origin);
+  if (!url.pathname.endsWith('/')) url.pathname += '/';
+  return url.toString();
+}
+
 export class LeadOpsClient {
   private http: KyInstance;
   private readonly opts: ClientOptions;
 
   constructor(opts: ClientOptions) {
-    this.opts = opts;
+    this.opts = { ...opts, baseUrl: normalizeBaseUrl(opts.baseUrl) };
     this.http = ky.create({
-      prefixUrl: opts.baseUrl,
+      prefixUrl: this.opts.baseUrl,
       timeout: 30_000,
       retry: { limit: 2 },
       hooks: {
@@ -42,10 +50,20 @@ export class LeadOpsClient {
   }
 
   private async unwrap<T>(p: Promise<Response>): Promise<T> {
-    const res = await p;
-    const body = (await res.json()) as ApiEnvelope<T>;
-    if (body.code !== 0) throw new Error(`[${body.code}] ${body.message}`);
-    return body.data;
+    try {
+      const res = await p;
+      const body = (await res.json()) as ApiEnvelope<T>;
+      if (body.code !== 0) throw new Error(`[${body.code}] ${body.message}`);
+      return body.data;
+    } catch (error) {
+      if (!(error instanceof HTTPError)) throw error;
+      const body = await error.response.clone().json().catch(() => null) as
+        | Partial<ApiEnvelope<unknown>> & { statusCode?: number }
+        | null;
+      const code = body?.code ?? body?.statusCode ?? error.response.status;
+      const message = body?.message ?? error.message;
+      throw new Error(`[${code}] ${message}`);
+    }
   }
 
   profile = {
@@ -91,11 +109,12 @@ export class LeadOpsClient {
     batchDelete: (ids: string[]) =>
       this.unwrap<{ deleted: number }>(this.http.post('customer/batch-delete', { json: { ids } })),
     removeAll: () => this.unwrap<{ deleted: number }>(this.http.delete('customer/_all')),
-    export: async (q: CustomerListQuery = {}): Promise<{ blob: Blob; filename: string; groups: number; total: number }> => {
-      const url = new URL('customer/export', this.opts.baseUrl);
-      for (const [k, v] of Object.entries(q)) {
-        if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, String(v));
-      }
+    startExport: (q: CustomerListQuery = {}) =>
+      this.unwrap<ExportJob>(this.http.post('customer/exports', { json: q })),
+    exportStatus: (jobId: string) =>
+      this.unwrap<ExportJob>(this.http.get(`customer/exports/${jobId}`)),
+    downloadExport: async (job: ExportJob): Promise<{ blob: Blob; filename: string }> => {
+      const url = new URL(`customer/exports/${job.job_id}/download`, this.opts.baseUrl);
       const token = this.opts.getToken?.();
       const res = await fetch(url.toString(), {
         method: 'GET',
@@ -107,11 +126,9 @@ export class LeadOpsClient {
       if (!res.ok) throw new Error(`[${res.status}] ${await res.text()}`);
       const disposition = res.headers.get('Content-Disposition') ?? '';
       const match = /filename="?([^";]+)"?/i.exec(disposition);
-      const filename = match?.[1] ?? `customers-export-${Date.now()}.zip`;
-      const groups = Number(res.headers.get('X-Export-Groups') ?? 0);
-      const total = Number(res.headers.get('X-Export-Total') ?? 0);
+      const filename = match?.[1] ?? job.file_name ?? `customers-export-${Date.now()}.zip`;
       const blob = await res.blob();
-      return { blob, filename, groups, total };
+      return { blob, filename };
     },
     import: (file: File, onProgress?: (loaded: number, total: number) => void) =>
       new Promise<CustomerImportReport>((resolve, reject) => {
@@ -126,11 +143,17 @@ export class LeadOpsClient {
         };
         xhr.onload = () => {
           try {
-            const body = JSON.parse(xhr.responseText) as ApiEnvelope<CustomerImportReport>;
-            if (body.code === 0) resolve(body.data);
-            else reject(new Error(`[${body.code}] ${body.message}`));
+            const body = JSON.parse(xhr.responseText) as Partial<ApiEnvelope<CustomerImportReport>> & {
+              statusCode?: number;
+            };
+            if (xhr.status >= 200 && xhr.status < 300 && body.code === 0 && body.data) {
+              resolve(body.data);
+              return;
+            }
+            const code = body.code ?? body.statusCode ?? xhr.status;
+            reject(new Error(`[${code}] ${body.message ?? 'import_failed'}`));
           } catch (e) {
-            reject(e as Error);
+            reject(new Error(`[${xhr.status}] ${xhr.responseText || (e as Error).message}`));
           }
         };
         xhr.onerror = () => reject(new Error('network_error'));

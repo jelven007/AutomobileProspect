@@ -1,7 +1,9 @@
 import { Controller, Get, Query } from '@nestjs/common';
 import type { Lead } from '@leadops/types';
+import { Roles } from '../common/auth';
 
 @Controller('sdr')
+@Roles('admin', 'operator', 'viewer')
 export class SdrController {
   @Get('leads')
   listLeads(@Query('owner') _owner?: string): Lead[] {

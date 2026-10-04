@@ -86,7 +86,7 @@ export interface ApiEnvelope<T> {
 
 export interface Customer {
   customer_id: string;
-  huji_no: string;
+  huji_no?: string;
   name: string;
   gender?: 'M' | 'F' | 'U';
   birth_date?: string;
@@ -137,12 +137,31 @@ export interface IngestJob {
   job_id: string;
   source_bucket?: string;
   source_prefix?: string;
+  file_name?: string;
   status: 'PENDING' | 'RUNNING' | 'SUCCESS' | 'FAILED';
   total_rows: number;
   success_rows: number;
   skipped_rows: number;
+  duplicate_rows: number;
+  written_rows: number;
+  inserted_rows: number;
+  updated_rows: number;
+  checkpoint_row: number;
   started_at?: string;
   finished_at?: string;
+  error?: string;
+}
+
+export interface ExportJob {
+  job_id: string;
+  status: 'PENDING' | 'RUNNING' | 'SUCCESS' | 'FAILED';
+  file_name?: string;
+  total_rows: number;
+  groups: number;
+  created_at: string;
+  started_at?: string;
+  finished_at?: string;
+  expires_at?: string;
   error?: string;
 }
 
@@ -152,7 +171,7 @@ export interface CustomerImportReport {
   total_rows: number;
   success_rows: number;    // 清洗通过（去重前）
   skipped_rows: number;    // 清洗失败
-  duplicate_rows: number;  // 文件内 huji_no 重复，被合并
+  duplicate_rows: number;  // 文件内身份证重复，被合并
   written_rows: number;    // 实际入库（含 insert + update）
   inserted_rows: number;   // 新增（本次导入前库内无匹配）
   updated_rows: number;    // 合并到已有记录（跨批次 UPSERT）

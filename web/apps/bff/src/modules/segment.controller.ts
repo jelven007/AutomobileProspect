@@ -1,11 +1,13 @@
 import { Body, Controller, Get, Post } from '@nestjs/common';
 import type { Segment, SegmentExpr } from '@leadops/types';
+import { Roles } from '../common/auth';
 
 interface EstimateDto {
   expr: SegmentExpr;
 }
 
 @Controller('segment')
+@Roles('admin', 'operator', 'viewer')
 export class SegmentController {
   @Get()
   list(): Segment[] {
@@ -25,6 +27,7 @@ export class SegmentController {
   }
 
   @Post('estimate')
+  @Roles('admin', 'operator')
   estimate(@Body() dto: EstimateDto) {
     const sample = JSON.stringify(dto.expr).length;
     return { estimated_count: sample * 1234, cost: '< 300ms' };

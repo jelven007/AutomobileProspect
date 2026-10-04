@@ -51,22 +51,31 @@ export default function CustomerPage() {
     setExporting(true);
     try {
       const { q, address, province, city, district, gender } = query;
-      const r = await api.customer.export({ q, address, province, city, district, gender });
-      if (r.total === 0) {
+      let job = await api.customer.startExport({ q, address, province, city, district, gender });
+      message.info(`导出任务已创建：${job.job_id}`);
+      const deadline = Date.now() + 15 * 60 * 1000;
+      while (job.status === 'PENDING' || job.status === 'RUNNING') {
+        if (Date.now() >= deadline) throw new Error('导出仍在后台运行，请稍后重试');
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        job = await api.customer.exportStatus(job.job_id);
+      }
+      if (job.status === 'FAILED') throw new Error(job.error ?? 'export_failed');
+      if (job.total_rows === 0) {
         message.warning('当前筛选条件下没有数据可导出');
         return;
       }
-      const url = URL.createObjectURL(r.blob);
+      const result = await api.customer.downloadExport(job);
+      const url = URL.createObjectURL(result.blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = r.filename;
+      a.download = result.filename;
       document.body.appendChild(a);
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
       notification.success({
         message: '导出成功',
-        description: `共 ${r.total} 条，已按省市拆分为 ${r.groups} 个 Excel（省份-城市-条数.xlsx），打包成 ZIP 下载至浏览器的「下载」目录`,
+        description: `共 ${job.total_rows} 条，已按省市拆分为 ${job.groups} 个 Excel（省份-城市-条数.xlsx），打包成 ZIP 下载至浏览器的「下载」目录`,
         placement: 'topRight',
         duration: 6,
       });
@@ -207,7 +216,7 @@ export default function CustomerPage() {
           </Button>
         </Popconfirm>
         <Popconfirm
-          title="确认清空全部客户数据？此操作不可恢复"
+          title="确认停用全部客户数据？记录将软删除并保留审计"
           okText="全部清空"
           okButtonProps={{ danger: true }}
           onConfirm={() => removeAllMut.mutate()}
@@ -333,9 +342,9 @@ function CustomerEditor({
           name="huji_no"
           label="编码编号"
           rules={[{ pattern: /^\d+$/, message: '必须为纯数字' }]}
-          tooltip="选填；留空时系统按新增记录保存"
+          tooltip="选填；仅作为普通展示字段，不参与唯一性判断"
         >
-          <Input disabled={isEdit} placeholder="可留空" />
+          <Input placeholder="可留空" />
         </Form.Item>
         <Form.Item name="name" label="姓名" rules={[{ required: true }]}>
           <Input />
@@ -346,7 +355,14 @@ function CustomerEditor({
         <Form.Item name="birth_date" label="出生日期">
           <DatePicker format="YYYY-MM-DD" style={{ width: '100%' }} placeholder="选择日期" />
         </Form.Item>
-        <Form.Item name="id_card" label="身份证（18 位）" rules={[{ pattern: /^\d{17}[\dXx]$/, message: '身份证格式不正确' }]}>
+        <Form.Item
+          name="id_card"
+          label="身份证（18 位）"
+          rules={[
+            { required: true, message: '请输入身份证号码' },
+            { pattern: /^\d{17}[\dXx]$/, message: '身份证格式不正确' },
+          ]}
+        >
           <Input placeholder="明文存储（一期不脱敏）" />
         </Form.Item>
         <Form.Item name="phone_masked" label="手机号">

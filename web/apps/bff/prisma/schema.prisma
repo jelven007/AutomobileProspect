@@ -2,7 +2,7 @@
 // 与 ingest-service/migrations/001_init.sql 严格对齐，不走 prisma migrate。
 // customer 表是分区表（PARTITION BY RANGE ingest_month），Prisma 不原生支持分区，
 // 但只要字段对齐、每条记录带 ingest_month，client 可正常读写。
-// 部分唯一索引 uk_customer_huji (huji_no, ingest_month) WHERE is_deleted=FALSE 由 DDL 兜底，
+// 部分唯一索引 uk_customer_id_card_month (id_card, ingest_month) WHERE is_deleted=FALSE 由 DDL 兜底，
 // Prisma schema 这里不声明 @@unique，避免 push 回去改坏约束。
 
 generator client {
@@ -16,12 +16,12 @@ datasource db {
 
 model Customer {
   customer_id    String    @db.Char(26)
-  huji_no        String    @db.VarChar(32)
+  huji_no        String?   @db.VarChar(32)
   name           String    @db.VarChar(64)
   gender         String?   @db.Char(1)
   birth_date     DateTime? @db.Date
   id_card        String?   @db.VarChar(32)
-  phone_masked   String?   @db.VarChar(16)
+  phone_masked   String?   @db.VarChar(64)
   address        String?   @db.VarChar(256)
   stat_time      DateTime? @db.Timestamptz(6)
   province       String?   @db.VarChar(32)
@@ -38,6 +38,8 @@ model Customer {
   is_deleted     Boolean   @default(false)
   created_at     DateTime  @default(now()) @db.Timestamptz(6)
   updated_at     DateTime  @default(now()) @db.Timestamptz(6)
+  identities     CustomerIdentity[]
+  ingest_rows    IngestRowIdentity[]
 
   @@id([customer_id, ingest_month])
   @@index([huji_no], map: "idx_customer_huji")
@@ -51,18 +53,88 @@ model IngestJob {
   job_id         String    @id @db.VarChar(64)
   source_bucket  String?   @db.VarChar(128)
   source_prefix  String?   @db.VarChar(256)
+  file_name      String?   @db.VarChar(256)
+  file_path      String?
+  file_hash      String?   @db.Char(64)
   status         String    @db.VarChar(16)
   total_rows     BigInt    @default(0)
   success_rows   BigInt    @default(0)
   skipped_rows   BigInt    @default(0)
   duplicate_rows BigInt    @default(0)
   written_rows   BigInt    @default(0)
+  inserted_rows  BigInt    @default(0)
+  updated_rows   BigInt    @default(0)
   warnings       BigInt    @default(0)
+  checkpoint_row BigInt    @default(0)
+  warnings_json  Json?
+  report_json    Json?
+  retry_of       String?   @db.VarChar(64)
   started_at     DateTime? @db.Timestamptz(6)
   finished_at    DateTime? @db.Timestamptz(6)
   error          String?
+  created_at     DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at     DateTime  @default(now()) @db.Timestamptz(6)
 
+  @@index([created_at(sort: Desc)], map: "idx_ingest_job_created")
   @@map("ingest_job")
+}
+
+model CustomerIdentity {
+  id_card      String   @id @db.VarChar(32)
+  customer_id  String   @db.Char(26)
+  ingest_month DateTime @db.Date
+  created_at   DateTime @default(now()) @db.Timestamptz(6)
+  updated_at   DateTime @default(now()) @db.Timestamptz(6)
+  customer     Customer @relation(fields: [customer_id, ingest_month], references: [customer_id, ingest_month], onDelete: Cascade)
+
+  @@map("customer_identity")
+}
+
+model IngestRowIdentity {
+  ingest_batch String   @db.VarChar(64)
+  source_file  String   @db.VarChar(256)
+  source_row   Int
+  customer_id  String   @db.Char(26)
+  ingest_month DateTime @db.Date
+  created_at   DateTime @default(now()) @db.Timestamptz(6)
+  customer     Customer @relation(fields: [customer_id, ingest_month], references: [customer_id, ingest_month], onDelete: Cascade)
+
+  @@id([ingest_batch, source_file, source_row])
+  @@map("ingest_row_identity")
+}
+
+model ExportJob {
+  job_id       String    @id @db.VarChar(64)
+  status       String    @db.VarChar(16)
+  filters      Json      @default("{}")
+  file_path    String?
+  file_name    String?   @db.VarChar(256)
+  total_rows   BigInt    @default(0)
+  groups       Int       @default(0)
+  requested_by String?   @db.VarChar(128)
+  error        String?
+  created_at   DateTime  @default(now()) @db.Timestamptz(6)
+  started_at   DateTime? @db.Timestamptz(6)
+  finished_at  DateTime? @db.Timestamptz(6)
+  expires_at   DateTime? @db.Timestamptz(6)
+
+  @@index([created_at(sort: Desc)], map: "idx_export_job_created")
+  @@map("export_job")
+}
+
+model AuditLog {
+  audit_id    BigInt   @id @default(autoincrement())
+  actor       String   @db.VarChar(128)
+  action      String   @db.VarChar(64)
+  entity_type String   @db.VarChar(64)
+  entity_id   String?  @db.VarChar(128)
+  before_data Json?
+  after_data  Json?
+  request_id  String?  @db.VarChar(128)
+  created_at  DateTime @default(now()) @db.Timestamptz(6)
+
+  @@index([entity_type, entity_id, created_at(sort: Desc)], map: "idx_audit_log_entity")
+  @@map("audit_log")
 }
 
 // ingest_row_log 没有主键，BFF 一期暂不读写它，这里 @@ignore

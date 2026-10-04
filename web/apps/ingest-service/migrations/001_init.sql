@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS customer (
   gender         CHAR(1),
   birth_date     DATE,
   id_card        VARCHAR(32),           -- 脱敏后：前 6 位 + 8 个 * + 后 4 位
-  phone_masked   VARCHAR(16),
+  phone_masked   VARCHAR(64),
   address        VARCHAR(256),
   stat_time      TIMESTAMPTZ,
   province       VARCHAR(32),           -- 由身份证前 2 位推导
@@ -47,15 +47,10 @@ BEGIN
   END LOOP;
 END $$;
 
--- 业务唯一键：按 (huji_no, ingest_month) 月粒度唯一；软删除行不占用
--- 全局唯一约束必须包含分区键（PG 限制），跨月重复 huji_no 的清算在阶段 3 由业务层保证
-CREATE UNIQUE INDEX IF NOT EXISTS uk_customer_huji
-  ON customer (huji_no, ingest_month) WHERE is_deleted = FALSE;
-
--- huji_no 单列普通索引，供跨月检索
+-- 编码编号仅为普通展示字段，不参与客户唯一性判断。
 CREATE INDEX IF NOT EXISTS idx_customer_huji ON customer (huji_no);
 
--- 身份证虽允许 huji_no 不同但相同（走告警不阻断），用普通索引供检索
+-- 身份证全局唯一映射由 004_id_card_identity.sql 建立。
 CREATE INDEX IF NOT EXISTS idx_customer_id_card ON customer (id_card);
 CREATE INDEX IF NOT EXISTS idx_customer_name_trgm ON customer USING gin (name gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_customer_province ON customer (province);

@@ -6,13 +6,11 @@ import { AppModule } from './app.module';
 import { EnvelopeInterceptor } from './common/envelope.interceptor';
 
 async function bootstrap() {
-  // 支撑 200MB xlsx 导入：
-  //  - bodyLimit 放到 512MB（Fastify 默认 1MB 会拒 200MB payload）
-  //  - keepAliveTimeout 调到 15 分钟（200MB 清洗预计 5–10 分钟）
-  //  - disableRequestLogging 关掉大文件 req 日志，避免 pino 高频写盘拖慢
+  const maxUploadMb = Number(process.env.MAX_UPLOAD_MB ?? 512);
+  const maxUploadBytes = maxUploadMb * 1024 * 1024;
   const adapter = new FastifyAdapter({
     logger: true,
-    bodyLimit: 512 * 1024 * 1024,
+    bodyLimit: maxUploadBytes,
     keepAliveTimeout: 15 * 60 * 1000,
     connectionTimeout: 15 * 60 * 1000,
     disableRequestLogging: true,
@@ -20,15 +18,29 @@ async function bootstrap() {
   const app = await NestFactory.create<NestFastifyApplication>(AppModule, adapter);
   await app.register(multipart as never, {
     limits: {
-      fileSize: 512 * 1024 * 1024,  // 单文件上限 512MB，覆盖 200MB 场景并留出余量
+      fileSize: maxUploadBytes,
       files: 1,
       fieldSize: 1024 * 1024,
       headerPairs: 2000,
     },
   });
   app.setGlobalPrefix('bff');
+  const configuredOrigins = (process.env.CORS_ORIGINS ?? '')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+  const allowedOrigins = new Set(
+    configuredOrigins.length > 0
+      ? configuredOrigins
+      : process.env.NODE_ENV === 'production'
+        ? []
+        : ['http://localhost:5175', 'http://127.0.0.1:5175'],
+  );
   app.enableCors({
-    origin: true,
+    origin: (origin, callback) => {
+      if (!origin || allowedOrigins.has(origin)) callback(null, true);
+      else callback(new Error('cors_origin_not_allowed'), false);
+    },
     credentials: true,
     exposedHeaders: ['Content-Disposition', 'X-Export-Groups', 'X-Export-Total'],
   });

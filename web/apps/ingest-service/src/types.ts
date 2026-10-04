@@ -1,6 +1,6 @@
 export interface CustomerRow {
   name: string;
-  huji_no: string;
+  huji_no?: string;
   stat_time?: string | null;
   birth_date?: string | null;
   gender?: 'M' | 'F' | 'U';

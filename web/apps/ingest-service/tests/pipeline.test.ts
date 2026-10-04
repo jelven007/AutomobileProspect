@@ -8,7 +8,7 @@ import {
   maskIdCard,
 } from '../src/transforms';
 import { cleanRow, cleanRowDetailed, CleaningError, RowDeduper, buildDynamicMappings } from '../src/pipeline';
-import { parseIdCard } from '../src/id-card';
+import { normalizeIdCardForStorage, parseIdCard } from '../src/id-card';
 import type { IngestSchema } from '../src/types';
 
 describe('stripPrefixDigits', () => {
@@ -57,6 +57,11 @@ describe('parseDate / parseDateTime', () => {
   it('parses stat_time with time', () => {
     expect(parseDateTime('2016/02/26 16:51:34')).toBe('2016-02-26 16:51:34');
   });
+  it('rejects impossible calendar dates so id_card enrichment can replace them', () => {
+    expect(parseDate('1974/02/30')).toBeNull();
+    expect(parseDate('2023/02/29')).toBeNull();
+    expect(parseDate('2024/02/29')).toBe('2024-02-29');
+  });
 });
 
 const schema: IngestSchema = {
@@ -75,8 +80,8 @@ const schema: IngestSchema = {
       { index: 10, field: 'address' },
     ],
   },
-  dedupe: { key: 'huji_no', keep: 'last', secondary_key_warn: 'id_card' },
-  sink: { type: 'postgres', table: 'customer', batch_size: 2000, conflict_key: 'huji_no' },
+  dedupe: { key: 'id_card', keep: 'last' },
+  sink: { type: 'postgres', table: 'customer', batch_size: 2000, conflict_key: 'id_card' },
 };
 
 const ctx = { source_file: 'Demo.xlsx', source_row: 2, ingest_batch: 'b1' };
@@ -95,10 +100,10 @@ describe('cleanRow (真实 Demo.xlsx 结构)', () => {
     expect(out.id_card).toBe('510223197410137219');
     expect(out.address).toBe('重庆市綦江县赶水镇太公村4组');
     expect(out.stat_time).toBe('2016-02-26 16:51:34');
-    // 身份证派生：5102 走 cities_historical → 内江市；510223 走 districts → 荣县
+    // 身份证派生：5102/510223 使用 GB/T 2260 历史快照
     expect(out.province).toBe('四川省');
-    expect(out.city).toBe('内江市');
-    expect(out.district).toBe('荣县');
+    expect(out.city).toBe('重庆市');
+    expect(out.district).toBe('綦江县');
   });
 
   it('throws when huji_no not pure digits after strip', () => {
@@ -109,6 +114,11 @@ describe('cleanRow (真实 Demo.xlsx 结构)', () => {
   it('throws when name missing', () => {
     const row = ['派出所', 't', '地址', '2016户籍统计123', '', '男', 'x', '', '1', 'a', 'x', 'y'];
     expect(() => cleanRow(row, schema, ctx)).toThrow(CleaningError);
+  });
+
+  it('throws when id_card is missing', () => {
+    const row = ['派出所', '2016/02/26 16:51:34', '地址', '2016户籍统计123', '', '男', '', '张三', '1', 'a', 'x', 'y'];
+    expect(() => cleanRow(row, schema, ctx)).toThrow('required_missing:id_card');
   });
 
   it('enriches birth_date/gender from id_card when excel column is empty', () => {
@@ -132,6 +142,21 @@ describe('cleanRow (真实 Demo.xlsx 结构)', () => {
 });
 
 describe('cleanRowDetailed', () => {
+  it('accepts contact values longer than a standard 11-digit mobile number', () => {
+    const row = ['派出所户籍站', '2016/02/26 16:51:34', '户籍地址：有效', '2016户籍统计9161337',
+      '1974/10/13', '男', '510223197410137219', '谭陆友', '511623199012255035',
+      '重庆市綦江县赶水镇太公村4组', '2', '8'];
+    expect(cleanRowDetailed(row, schema, ctx).row.phone_masked).toBe('511623199012255035');
+  });
+
+  it('rejects overlong values as a row-level cleaning error', () => {
+    const row = ['派出所户籍站', '2016/02/26 16:51:34', '户籍地址：有效', '2016户籍统计9161337',
+      '1974/10/13', '男', '510223197410137219', '谭陆友', '1'.repeat(65),
+      '重庆市綦江县赶水镇太公村4组', '2', '8'];
+    expect(() => cleanRowDetailed(row, schema, ctx))
+      .toThrowError('value_too_long:phone_masked:64');
+  });
+
   it('emits id_card_checksum_invalid when check digit is wrong', () => {
     // 510223197410137219 的末位本是 9，这里改为 0 制造校验失败
     const row = ['派出所户籍站', '2016/02/26 16:51:34', '户籍地址：有效', '2016户籍统计9161337',
@@ -141,6 +166,17 @@ describe('cleanRowDetailed', () => {
     expect(warnings).toContain('id_card_checksum_invalid');
     expect(cleaned.huji_no).toBe('9161337');  // 清洗仍成功，身份证明文入库
     expect(cleaned.id_card).toBe('510223197410137210');
+  });
+
+  it('corrects an impossible id_card birth date backwards before storage', () => {
+    const row = ['派出所户籍站', '2016/01/15 11:53:06', '户籍地址：有效', '2016户籍统计3026015',
+      '7402/30/14', '男', '220521740230141', '王玉辉', '13549657871',
+      '通化县七道沟镇东明村', '8', '3'];
+    const { row: cleaned, warnings } = cleanRowDetailed(row, schema, ctx);
+    expect(cleaned.id_card).toBe('220521197402281418');
+    expect(cleaned.birth_date).toBe('1974-02-28');
+    expect(warnings).toContain('id_card_birth_date_corrected');
+    expect(warnings).not.toContain('id_card_checksum_invalid');
   });
 
   it('no warnings when id_card is valid', () => {
@@ -164,8 +200,14 @@ describe('parseIdCard', () => {
     expect(parseIdCard('510104199001012345').city).toBe('成都市');
   });
 
-  it('resolves city via historical code (5102 → 内江市)', () => {
-    expect(parseIdCard('510223197410137219').city).toBe('内江市');
+  it('resolves city and district via historical GB/T 2260 snapshots', () => {
+    expect(parseIdCard('510223197410137219').city).toBe('重庆市');
+    expect(parseIdCard('510223197410137219').district).toBe('綦江县');
+    expect(parseIdCard('513524197410137219').city).toBe('黔江地区');
+    expect(parseIdCard('513524197410137219').district).toBe('酉阳土家族苗族自治县');
+    expect(parseIdCard('510212197410137219').district).toBe('沙坪坝区');
+    expect(parseIdCard('120225197410137219').city).toBe('天津市');
+    expect(parseIdCard('460002197410137219').city).toBe('海南省直辖县级行政区划');
   });
 
   it('resolves district for 6-digit code', () => {
@@ -193,32 +235,46 @@ describe('parseIdCard', () => {
     expect(parseIdCard('510223197410137210').checksum_valid).toBe(false);
     expect(parseIdCard('510223197410137219').checksum_valid).toBe(true);
   });
+
+  it('corrects impossible dates and recalculates the checksum', () => {
+    expect(normalizeIdCardForStorage('510223197402307219')).toEqual({
+      value: '510223197402287217',
+      birthDateCorrected: true,
+      originalBirthDate: '1974-02-30',
+      correctedBirthDate: '1974-02-28',
+    });
+    expect(normalizeIdCardForStorage('510223197402007219').value)
+      .toBe('510223197401317218');
+    expect(normalizeIdCardForStorage('21102119711131595')).toEqual({
+      value: '211021197111305952',
+      birthDateCorrected: true,
+      originalBirthDate: '1971-11-31',
+      correctedBirthDate: '1971-11-30',
+    });
+    const info = parseIdCard('510223197402307219');
+    expect(info.birth_date).toBe('1974-02-28');
+    expect(info.birth_date_corrected).toBe(true);
+    expect(info.normalized_id_card).toBe('510223197402287217');
+    expect(info.checksum_valid).toBe(true);
+  });
 });
 
 describe('RowDeduper', () => {
-  const dedupe = { key: 'huji_no' as const, keep: 'last' as const, secondary_key_warn: 'id_card' as const };
+  const dedupe = { key: 'id_card' as const, keep: 'last' as const };
   const mk = (huji_no: string, id_card = '', name = 'x') => ({
     huji_no, id_card, name,
     source_file: 'f', source_row: 0, ingest_batch: 'b',
   });
 
-  it('keeps last for same huji_no', () => {
+  it('keeps last for same id_card', () => {
     const d = new RowDeduper(dedupe);
-    d.add(mk('100', 'A', 'v1'));
-    const added = d.add(mk('100', 'A', 'v2'));
+    d.add(mk('100', 'IDCARD1', 'v1'));
+    const added = d.add(mk('200', 'IDCARD1', 'v2'));
     expect(added).toBe(false);
     expect(d.size()).toBe(1);
     expect(Array.from(d.values())[0].name).toBe('v2');
-  });
-
-  it('warns when id_card same but huji_no different', () => {
-    const d = new RowDeduper(dedupe);
-    d.add(mk('100', 'IDCARD1'));
-    d.add(mk('200', 'IDCARD1'));
-    expect(d.size()).toBe(2);
-    expect(d.warnings).toHaveLength(1);
-    expect(d.warnings[0].reason).toBe('id_card_conflict');
-    expect(d.warnings[0].against).toBe('100');
+    expect(Array.from(d.values())[0].huji_no).toBe('200');
+    expect(d.warnings).toHaveLength(0);
   });
 });
 

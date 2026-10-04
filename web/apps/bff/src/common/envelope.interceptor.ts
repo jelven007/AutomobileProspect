@@ -1,4 +1,5 @@
 import { CallHandler, ExecutionContext, Injectable, NestInterceptor } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 import { Observable, map } from 'rxjs';
 
 interface Envelope<T> {
@@ -13,9 +14,10 @@ interface Envelope<T> {
 export class EnvelopeInterceptor<T> implements NestInterceptor<T, Envelope<T> | T> {
   intercept(context: ExecutionContext, next: CallHandler<T>): Observable<Envelope<T> | T> {
     const http = context.switchToHttp();
-    const req = http.getRequest<{ headers?: Record<string, string> }>();
+    const req = http.getRequest<{ headers?: Record<string, string | string[] | undefined> }>();
     const reply = http.getResponse<{ sent?: boolean; raw?: { headersSent?: boolean } }>();
-    const rid = req.headers?.['x-request-id'] ?? Math.random().toString(36).slice(2, 10);
+    const rawRid = req.headers?.['x-request-id'];
+    const rid = (Array.isArray(rawRid) ? rawRid[0] : rawRid) ?? randomUUID();
     return next.handle().pipe(
       map((data) => {
         if (reply?.sent || reply?.raw?.headersSent) return data as T;

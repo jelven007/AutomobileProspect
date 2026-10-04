@@ -1,0 +1,4 @@
+{
+  "extends": "@leadops/tsconfig/base.json",
+  "include": ["src"]
+}

@@ -55,15 +55,14 @@ columns:
       field: address
 
 dedupe:
-  key: huji_no               # 文件内 / 批次内按此 key 去重
+  key: id_card               # 文件内 / 批次内按身份证去重
   keep: last                 # first | last（按出现顺序）；默认 last
   cross_batch:
     on_conflict: update      # update(UPSERT) | skip | fail
     bump_version: true
-  secondary_key_warn: id_card  # huji_no 不同但 id_card 相同时写入 ingest_row_log 告警
 
 sink:
   type: postgres
   table: customer
   batch_size: 2000
-  conflict_key: huji_no
+  conflict_key: id_card

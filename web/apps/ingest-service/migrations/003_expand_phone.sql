@@ -1,0 +1,6 @@
+BEGIN;
+
+ALTER TABLE customer
+  ALTER COLUMN phone_masked TYPE VARCHAR(64);
+
+COMMIT;

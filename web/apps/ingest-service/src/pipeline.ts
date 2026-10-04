@@ -1,6 +1,6 @@
 import type { CustomerRow, DedupeConfig, IngestSchema, SchemaColumn } from './types';
 import { TRANSFORMS } from './transforms';
-import { parseIdCard, sanitizeIdCard, expand15To18 } from './id-card';
+import { normalizeIdCardForStorage, parseIdCard } from './id-card';
 
 export class CleaningError extends Error {
   constructor(public readonly reason: string, public readonly raw: unknown[]) {
@@ -37,6 +37,21 @@ const HEADER_TO_FIELD: Array<{ keywords: string[]; field: keyof CustomerRow; tra
   { keywords: ['受教育程度', '文化程度', '学历'], field: 'education' },
   { keywords: ['婚姻状况', '婚姻', '婚否'], field: 'marital_status' },
 ];
+
+const MAX_FIELD_LENGTHS: Partial<Record<keyof CustomerRow, number>> = {
+  huji_no: 32,
+  name: 64,
+  gender: 1,
+  id_card: 32,
+  phone_masked: 64,
+  address: 256,
+  province: 32,
+  city: 64,
+  district: 64,
+  occupation: 64,
+  education: 32,
+  marital_status: 16,
+};
 
 function matchFieldByHeader(header: string): { field: keyof CustomerRow; transform?: string; transform_args?: unknown[] } | null {
   const s = header.replace(/\s+/g, '');
@@ -207,6 +222,7 @@ export function cleanRowDetailed(
     if (info.district && !row.district) row.district = info.district;
     if (info.birth_date && !row.birth_date) row.birth_date = info.birth_date;
     if (info.gender && (!row.gender || row.gender === 'U')) row.gender = info.gender;
+    if (info.birth_date_corrected) warnings.push('id_card_birth_date_corrected');
     if (info.checksum_valid === false) warnings.push('id_card_checksum_invalid');
     if (!info.province) warnings.push('id_card_province_unknown');
     if (!info.city) warnings.push('id_card_city_unknown');
@@ -215,16 +231,23 @@ export function cleanRowDetailed(
 
   // Pass 3：身份证清洗（15→18 位扩展）后入库
   if (idCardRaw) {
-    const clean = sanitizeIdCard(idCardRaw);
-    const normalized = clean.length === 15 ? (expand15To18(clean) ?? clean) : clean;
-    row.id_card = normalized;
+    row.id_card = normalizeIdCardForStorage(idCardRaw).value;
   }
 
+  if (!row.id_card) {
+    throw new CleaningError('required_missing:id_card', rawRow);
+  }
   if (row.huji_no && !/^\d+$/.test(row.huji_no)) {
     throw new CleaningError('invalid_huji_no', rawRow);
   }
   if (!row.name) {
     throw new CleaningError('required_missing:name', rawRow);
+  }
+  for (const [field, maxLength] of Object.entries(MAX_FIELD_LENGTHS)) {
+    const value = row[field as keyof CustomerRow];
+    if (typeof value === 'string' && [...value].length > maxLength) {
+      throw new CleaningError(`value_too_long:${field}:${maxLength}`, rawRow);
+    }
   }
 
   return { row: row as CustomerRow, warnings };
@@ -232,8 +255,7 @@ export function cleanRowDetailed(
 
 /**
  * 批次内去重器：按 dedupe.key 去重，默认保留最后一条；
- * 同时按 secondary_key_warn（如身份证）识别"编码号不同但身份证相同"的疑似冲突，
- * 这些冲突不会丢弃数据，而是通过 warnings 回调上报，便于入库 ingest_row_log。
+ * 可选 secondary_key_warn 仅用于兼容旧配置的次级冲突告警。
  */
 export class RowDeduper {
   private readonly byKey = new Map<string, CustomerRow>();

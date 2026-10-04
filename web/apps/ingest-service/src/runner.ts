@@ -4,7 +4,7 @@ import { parse as parseYaml } from 'yaml';
 import { ulid } from 'ulid';
 import { ObjectStorage } from './storage';
 import { streamXlsx } from './xlsx-stream';
-import { cleanRowDetailed, CleaningError, RowDeduper } from './pipeline';
+import { cleanRowDetailed, CleaningError } from './pipeline';
 import { PgSink, RowLogSink } from './sink';
 import type { IngestSchema } from './types';
 
@@ -68,9 +68,9 @@ export interface RunReport {
   totalRows: number;
   successRows: number;      // 清洗通过（去重前）
   skippedRows: number;      // 清洗失败
-  duplicateRows: number;    // 同批次 huji_no 重复，被合并
+  duplicateRows: number;    // 同批次身份证重复，被合并
   writtenRows: number;      // 实际入库（UPSERT 调用次数）
-  conflictWarnings: number; // 身份证相同但 huji_no 不同
+  conflictWarnings: number; // 兼容旧报告，身份证唯一模式下恒为 0
   checksumInvalid: number;  // 身份证 ISO7064 校验失败
   errors: Array<{ file: string; row: number; reason: string }>;
 }
@@ -78,9 +78,9 @@ export interface RunReport {
 /**
  * 阶段 2 的 ingest 主流程。
  * 落库策略：
- *   - 无 dedupe：清洗后立即 push 给 PgSink，内存不积累（阶段 2.3）
- *   - 有 dedupe：按 huji_no 去重后统一 flush，兼容 last-wins 语义
- * 三类告警（cleaning_error / id_card_conflict / id_card_checksum_invalid）
+ *   - 清洗后立即 push 给 PgSink，内存仅保留一个数据库批次；
+ *   - 批内 last-wins 与跨批次唯一由数据库 sink 统一处理。
+ * 清洗告警（cleaning_error / id_card_checksum_invalid）
  * 统一通过 RowLogSink 写入 ingest_row_log，便于后续运营看板。
  */
 export async function runIngest(opts: RunOptions): Promise<RunReport> {
@@ -93,7 +93,6 @@ export async function runIngest(opts: RunOptions): Promise<RunReport> {
   });
   const sink = new PgSink(opts.pgUrl, schema.sink.batch_size);
   const rowLog = new RowLogSink(sink.pool);
-  const deduper = schema.dedupe ? new RowDeduper(schema.dedupe) : null;
 
   const jobId = ulid();
   const report: RunReport = {
@@ -113,7 +112,7 @@ export async function runIngest(opts: RunOptions): Promise<RunReport> {
   // ingest_job 开始行：便于看板实时追踪进度；finally 块里补 finished_at + stats
   await sink.pool.query(
     `INSERT INTO ingest_job (job_id, source_bucket, source_prefix, status, started_at)
-     VALUES ($1,$2,$3,'running',NOW())`,
+     VALUES ($1,$2,$3,'RUNNING',NOW())`,
     [jobId, schema.source.bucket, prefix],
   );
 
@@ -138,68 +137,74 @@ export async function runIngest(opts: RunOptions): Promise<RunReport> {
             if (w === 'id_card_checksum_invalid') report.checksumInvalid += 1;
             await rowLog.push({ job_id: jobId, file: obj.key, row_no: rowNo, reason: w });
           }
-          if (deduper) {
-            const added = deduper.add(row);
-            if (!added) report.duplicateRows += 1;
-          } else {
-            await sink.push(row);
-            report.writtenRows += 1;
-          }
+          await sink.push(row);
         } catch (e) {
+          if (!(e instanceof CleaningError)) throw e;
           report.skippedRows += 1;
-          const reason = e instanceof CleaningError ? e.reason : 'unknown';
+          const reason = e.reason;
           if (report.errors.length < 100) report.errors.push({ file: obj.key, row: rowNo, reason });
           await rowLog.push({
             job_id: jobId, file: obj.key, row_no: rowNo,
             reason: 'cleaning_error', raw: { reason, values },
           });
         }
+        if (report.totalRows % 10_000 === 0) {
+          await sink.pool.query(
+            `UPDATE ingest_job
+                SET total_rows=$2, success_rows=$3, skipped_rows=$4,
+                    duplicate_rows=$5, written_rows=$6, inserted_rows=$7,
+                    updated_rows=$8, warnings=$9, checkpoint_row=$2,
+                    updated_at=NOW()
+              WHERE job_id=$1`,
+            [
+              jobId, report.totalRows, report.successRows, report.skippedRows,
+              sink.stats.duplicateRows, sink.stats.inserted + sink.stats.updated,
+              sink.stats.inserted, sink.stats.updated,
+              sink.stats.conflictWarnings + report.checksumInvalid,
+            ],
+          );
+        }
       }
     }
 
-    if (deduper) {
-      for (const r of deduper.values()) {
-        await sink.push(r);
-        report.writtenRows += 1;
-      }
-      report.conflictWarnings = deduper.warnings.length;
-      for (const w of deduper.warnings) {
-        await rowLog.push({
-          job_id: jobId,
-          file: w.row.source_file,
-          row_no: w.row.source_row,
-          reason: w.reason,
-          raw: { against_huji_no: w.against, this_huji_no: w.row.huji_no },
-        });
-      }
-    }
-
+    await sink.flush();
     await rowLog.flush();
+    report.duplicateRows = sink.stats.duplicateRows;
+    report.writtenRows = sink.stats.inserted + sink.stats.updated;
+    report.conflictWarnings = sink.stats.conflictWarnings;
   } catch (e) {
     const errMsg = e instanceof Error ? e.message : String(e);
+    await rowLog.flush().catch(() => undefined);
     await sink.pool.query(
       `UPDATE ingest_job
-          SET status='failed', finished_at=NOW(), error=$2,
+          SET status='FAILED', finished_at=NOW(), error=$2,
               total_rows=$3, success_rows=$4, skipped_rows=$5,
-              duplicate_rows=$6, written_rows=$7, warnings=$8
+              duplicate_rows=$6, written_rows=$7, inserted_rows=$8,
+              updated_rows=$9, warnings=$10, checkpoint_row=$3,
+              updated_at=NOW()
         WHERE job_id=$1`,
       [jobId, errMsg, report.totalRows, report.successRows, report.skippedRows,
-       report.duplicateRows, report.writtenRows,
-       report.conflictWarnings + report.checksumInvalid],
+       sink.stats.duplicateRows, sink.stats.inserted + sink.stats.updated,
+       sink.stats.inserted, sink.stats.updated,
+       sink.stats.conflictWarnings + report.checksumInvalid],
     ).catch(() => undefined);
-    await sink.close().catch(() => undefined);
+    await sink.abort().catch(() => undefined);
     throw e;
   }
 
   await sink.pool.query(
     `UPDATE ingest_job
-        SET status='succeeded', finished_at=NOW(),
+        SET status='SUCCESS', finished_at=NOW(),
             total_rows=$2, success_rows=$3, skipped_rows=$4,
-            duplicate_rows=$5, written_rows=$6, warnings=$7
+            duplicate_rows=$5, written_rows=$6, inserted_rows=$7,
+            updated_rows=$8, warnings=$9, checkpoint_row=$2,
+            report_json=$10::jsonb, updated_at=NOW()
       WHERE job_id=$1`,
     [jobId, report.totalRows, report.successRows, report.skippedRows,
      report.duplicateRows, report.writtenRows,
-     report.conflictWarnings + report.checksumInvalid],
+     sink.stats.inserted, sink.stats.updated,
+     report.conflictWarnings + report.checksumInvalid,
+     JSON.stringify(report)],
   );
   await sink.close();
 
