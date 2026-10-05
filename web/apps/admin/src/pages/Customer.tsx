@@ -103,8 +103,7 @@ export default function CustomerPage() {
   const handleExport = async () => {
     setExporting(true);
     try {
-      const { q, address, province, city, district, gender, id_type } = query;
-      const job = await api.customer.startExport({ q, address, province, city, district, gender, id_type });
+      const job = await api.customer.startExport({});
       message.success(`导出任务已创建：${job.job_id}`);
       navigate('/export-jobs');
     } catch (e) {
@@ -277,7 +276,7 @@ export default function CustomerPage() {
         <Button size="small" type="primary" onClick={() => setCreating(true)}>新增客户</Button>
         <Button size="small" onClick={() => setImporting(true)}>批量导入</Button>
         <Button size="small" loading={exporting} onClick={handleExport}>
-          批量导出
+          全量导出
         </Button>
         <Popconfirm
           title={`批量删除选中的 ${selectedIds.length} 条？`}
