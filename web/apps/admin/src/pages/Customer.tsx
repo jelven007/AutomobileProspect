@@ -220,8 +220,8 @@ export default function CustomerPage() {
     >
       <Space wrap size={[8, 8]} className="customer-filters">
         <Input.Search
-          placeholder="按姓名/编码编号搜索"
-          aria-label="按姓名或编码编号搜索"
+          placeholder="按姓名搜索"
+          aria-label="按姓名搜索"
           size="small"
           allowClear
           style={{ width: 180 }}

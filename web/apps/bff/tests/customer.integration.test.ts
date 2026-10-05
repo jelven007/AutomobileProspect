@@ -312,8 +312,10 @@ describe.sequential('CustomerService PostgreSQL integration', () => {
 
   it('supports first, middle, last and out-of-range pages with combined document filters', async () => {
     const batch = `${runId}-pages`;
+    const pageHuji = '880000000001';
     await service.upsertBatch(Array.from({ length: 8 }, (_, i) => ({
       name: `${batch}-${i}`, id_card: idCard(String(90 + i)), id_type: 'resident_id',
+      huji_no: i === 0 ? pageHuji : undefined,
       gender: 'M' as const, city: '分页测试市', ingest_batch: batch,
     })));
     await service.upsertBatch([{
@@ -338,6 +340,7 @@ describe.sequential('CustomerService PostgreSQL integration', () => {
     expect(await list('3', 'resident_id', 'no-such-fixture')).toMatchObject({
       items: [], total: 0, total_pages: 0, page: 1, has_more: false,
     });
+    expect(await list('1', 'resident_id', pageHuji)).toMatchObject({ items: [], total: 0 });
     for (const page of ['0', '-1', '1.5', 'Infinity', '9007199254740992']) {
       await expect(list(page)).rejects.toMatchObject({ status: 400 });
     }
