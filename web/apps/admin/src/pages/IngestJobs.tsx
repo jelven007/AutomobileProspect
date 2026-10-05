@@ -55,7 +55,7 @@ export default function IngestJobsPage() {
           { title: '总行数', dataIndex: 'total_rows' },
           { title: '成功', dataIndex: 'success_rows' },
           { title: '新增', dataIndex: 'inserted_rows' },
-          { title: '更新', dataIndex: 'updated_rows' },
+          { title: '重复', dataIndex: 'updated_rows' },
           { title: '跳过', dataIndex: 'skipped_rows' },
           { title: 'Checkpoint', dataIndex: 'checkpoint_row' },
           { title: '开始', dataIndex: 'started_at' },
