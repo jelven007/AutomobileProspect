@@ -161,7 +161,7 @@ export interface IngestJob {
 
 export interface ExportJob {
   job_id: string;
-  status: 'PENDING' | 'RUNNING' | 'SUCCESS' | 'FAILED';
+  status: 'PENDING' | 'RUNNING' | 'PAUSING' | 'PAUSED' | 'SUCCESS' | 'FAILED';
   file_name?: string;
   total_rows: number;
   processed_rows: number;

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { rm } from 'node:fs/promises';
+import { access, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { normalizeIdCardForStorage } from '@leadops/ingest-service';
@@ -12,6 +12,16 @@ import { PrismaService } from '../src/prisma/prisma.service';
 const runId = `integration-${Date.now()}`;
 const huji = (suffix: string) => `98${String(Date.now()).slice(-7)}${suffix}`;
 const testDistrict = `99${String(Date.now()).slice(-4)}`;
+const organizationCode = (seed: string): string => {
+  const alphabet = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  const weights = [3, 7, 9, 10, 5, 8, 4, 2];
+  const base = seed.replace(/\D/g, '').slice(-8).padStart(8, '1');
+  const sum = weights.reduce((total, weight, index) =>
+    total + alphabet.indexOf(base[index]) * weight, 0);
+  const check = 11 - sum % 11;
+  return `${base}${check === 10 ? 'X' : check === 11 ? '0' : String(check)}`;
+};
+const editedOrganizationCode = organizationCode(runId);
 const idCard = (suffix: string) => normalizeIdCardForStorage(
   `${testDistrict}19900101${suffix.padStart(3, '0')}`,
 ).value;
@@ -211,11 +221,12 @@ describe.sequential('CustomerService PostgreSQL integration', () => {
         version: org.version, id_type: 'passport_cn',
       }, { headers: {} })).rejects.toMatchObject({ status: 409 });
       const edited = await controller.update(org.customer_id, {
-        version: org.version, id_card: '56432454-5',
+        version: org.version,
+        id_card: `${editedOrganizationCode.slice(0, 8)}-${editedOrganizationCode.slice(8)}`,
       }, { headers: {} });
-      expect(edited).toMatchObject({ id_type: 'organization_code', id_card: '564324545' });
+      expect(edited).toMatchObject({ id_type: 'organization_code', id_card: editedOrganizationCode });
       expect(await prisma.customerIdentity.count({ where: { id_card: key } })).toBe(1);
-      expect(await prisma.customerIdentity.count({ where: { id_card: '564324545' } })).toBe(1);
+      expect(await prisma.customerIdentity.count({ where: { id_card: editedOrganizationCode } })).toBe(1);
     } finally {
       await sink.abort();
     }
@@ -306,7 +317,9 @@ describe.sequential('CustomerService PostgreSQL integration', () => {
       version: pending.version, id_type: 'organization_code',
     }, { headers: {} });
     expect(verified).toMatchObject({ id_type: 'organization_code', id_card: common.id_card });
-    expect(await prisma.customerIdentity.count({ where: { id_type: 'pending_document' } })).toBe(0);
+    expect(await prisma.customerIdentity.count({
+      where: { id_type: 'pending_document', id_card: common.id_card },
+    })).toBe(0);
     for (const id_card of ['NULL', '13812345678', '12345678']) {
       await expect(service.upsertBatch([{ ...common, name: '无效', id_card, id_type: 'pending_document' }]))
         .rejects.toThrow('invalid_id_card_format');
@@ -391,7 +404,68 @@ describe.sequential('CustomerService PostgreSQL integration', () => {
       expect(await exports.list()).toEqual(expect.arrayContaining([
         expect.objectContaining({ job_id: jobId, status: 'SUCCESS' }),
       ]));
+      const download = await exports.getDownload(jobId);
+      expect(download).not.toBeNull();
+      await access(download!.path);
+      expect(await exports.remove(jobId)).toBe(true);
+      expect(await exports.get(jobId)).toBeNull();
+      await expect(access(download!.path)).rejects.toThrow();
+      jobId = undefined;
     } finally {
+      if (jobId) await prisma.exportJob.deleteMany({ where: { job_id: jobId } });
+      await rm(dataDir, { recursive: true, force: true });
+      if (previousDataDir === undefined) delete process.env.DATA_DIR;
+      else process.env.DATA_DIR = previousDataDir;
+    }
+  });
+
+  it('pauses a running export and resumes the same task from a clean workspace', async () => {
+    const batch = `${runId}-export-pause`;
+    await service.upsertBatch([
+      {
+        name: `${batch}-客户`,
+        id_card: idCard('112'),
+        id_type: 'resident_id',
+        province: '测试省',
+        city: '暂停测试市',
+        ingest_batch: batch,
+      },
+    ]);
+    const dataDir = join(tmpdir(), `${runId}-pause-exports`);
+    const previousDataDir = process.env.DATA_DIR;
+    process.env.DATA_DIR = dataDir;
+    const exports = new CustomerExportService(prisma);
+    const internals = exports as unknown as { writeWorkbook: () => Promise<void> };
+    let notifyStarted: (() => void) | undefined;
+    let releaseWrite: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => { notifyStarted = resolve; });
+    const blocked = new Promise<void>((resolve) => { releaseWrite = resolve; });
+    const workbookSpy = vi.spyOn(internals, 'writeWorkbook').mockImplementation(async () => {
+      notifyStarted?.();
+      await blocked;
+    });
+    let jobId: string | undefined;
+    try {
+      jobId = (await exports.create({ q: batch }, 'integration-test')).job_id;
+      await started;
+      expect((await exports.get(jobId))?.status).toBe('RUNNING');
+      expect(await exports.pause(jobId)).toMatchObject({ status: 'PAUSING' });
+      releaseWrite?.();
+      await vi.waitFor(async () => {
+        expect((await exports.get(jobId as string))?.status).toBe('PAUSED');
+      }, { timeout: 5_000, interval: 25 });
+
+      workbookSpy.mockRestore();
+      expect(['PENDING', 'RUNNING']).toContain((await exports.resume(jobId))?.status);
+      await vi.waitFor(async () => {
+        expect((await exports.get(jobId as string))?.status).toBe('SUCCESS');
+      }, { timeout: 15_000, interval: 50 });
+      expect(await exports.remove(jobId)).toBe(true);
+      expect(await exports.get(jobId)).toBeNull();
+      jobId = undefined;
+    } finally {
+      workbookSpy.mockRestore();
+      releaseWrite?.();
       if (jobId) await prisma.exportJob.deleteMany({ where: { job_id: jobId } });
       await rm(dataDir, { recursive: true, force: true });
       if (previousDataDir === undefined) delete process.env.DATA_DIR;

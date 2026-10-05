@@ -1,6 +1,12 @@
 import { useState } from 'react';
-import { App, Button, Progress, Space, Table, Tag, Tooltip } from 'antd';
-import { DownloadOutlined, ReloadOutlined } from '@ant-design/icons';
+import { App, Button, Popconfirm, Progress, Space, Table, Tag, Tooltip } from 'antd';
+import {
+  DeleteOutlined,
+  DownloadOutlined,
+  PauseCircleOutlined,
+  PlayCircleOutlined,
+  ReloadOutlined,
+} from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { ExportJob } from '@leadops/types';
 import { PageContainer } from '@leadops/ui';
@@ -9,6 +15,8 @@ import { api } from '../api';
 const STATUS: Record<ExportJob['status'], { color: string; label: string }> = {
   PENDING: { color: 'default', label: '排队中' },
   RUNNING: { color: 'processing', label: '处理中' },
+  PAUSING: { color: 'processing', label: '暂停中' },
+  PAUSED: { color: 'warning', label: '已暂停' },
   SUCCESS: { color: 'success', label: '已完成' },
   FAILED: { color: 'error', label: '失败' },
 };
@@ -45,17 +53,46 @@ export default function ExportJobsPage() {
     queryKey: ['export-jobs'],
     queryFn: () => api.customer.exportJobs(),
     refetchInterval: (query) => (
-      query.state.data?.some((job) => job.status === 'RUNNING' || job.status === 'PENDING')
+      query.state.data?.some((job) => (
+        job.status === 'RUNNING' || job.status === 'PENDING' || job.status === 'PAUSING'
+      ))
         ? 2000
         : false
     ),
   });
-  const active = data?.filter((job) => job.status === 'RUNNING' || job.status === 'PENDING').length ?? 0;
+  const active = data?.filter((job) => (
+    job.status === 'RUNNING' || job.status === 'PENDING' || job.status === 'PAUSING'
+  )).length ?? 0;
+  const refreshJobs = () => queryClient.invalidateQueries({ queryKey: ['export-jobs'] });
   const retry = useMutation({
     mutationFn: (job: ExportJob) => api.customer.startExport(job.filters ?? {}),
     onSuccess: () => {
       message.success('已创建新的导出任务');
-      queryClient.invalidateQueries({ queryKey: ['export-jobs'] });
+      refreshJobs();
+    },
+    onError: (error: Error) => message.error(error.message),
+  });
+  const pause = useMutation({
+    mutationFn: (jobId: string) => api.customer.pauseExport(jobId),
+    onSuccess: (job) => {
+      message.success(job.status === 'PAUSING' ? '暂停请求已提交' : '导出任务已暂停');
+      refreshJobs();
+    },
+    onError: (error: Error) => message.error(error.message),
+  });
+  const resume = useMutation({
+    mutationFn: (jobId: string) => api.customer.resumeExport(jobId),
+    onSuccess: () => {
+      message.success('导出任务已继续');
+      refreshJobs();
+    },
+    onError: (error: Error) => message.error(error.message),
+  });
+  const remove = useMutation({
+    mutationFn: (jobId: string) => api.customer.removeExport(jobId),
+    onSuccess: () => {
+      message.success('导出任务已删除');
+      refreshJobs();
     },
     onError: (error: Error) => message.error(error.message),
   });
@@ -162,27 +199,76 @@ export default function ExportJobsPage() {
             title: '操作',
             key: 'action',
             fixed: 'right',
-            width: 150,
+            width: 230,
             render: (_: unknown, job: ExportJob) => {
               const expired = !!job.expires_at && new Date(job.expires_at).getTime() <= Date.now();
+              const isActive = job.status === 'RUNNING' || job.status === 'PAUSING';
               return (
                 <Space size={4}>
-                  <Button
-                    size="small"
-                    icon={<DownloadOutlined />}
-                    disabled={job.status !== 'SUCCESS' || expired}
-                    loading={downloading === job.job_id}
-                    title={expired ? '文件已过期' : '下载 ZIP'}
-                    onClick={() => download(job)}
-                  >
-                    下载
-                  </Button>
+                  {job.status === 'SUCCESS' ? (
+                    <Button
+                      size="small"
+                      icon={<DownloadOutlined />}
+                      disabled={expired}
+                      loading={downloading === job.job_id}
+                      title={expired ? '文件已过期' : '下载 ZIP'}
+                      onClick={() => download(job)}
+                    >
+                      下载
+                    </Button>
+                  ) : null}
+                  {(job.status === 'PENDING' || job.status === 'RUNNING') ? (
+                    <Button
+                      size="small"
+                      icon={<PauseCircleOutlined />}
+                      loading={pause.isPending && pause.variables === job.job_id}
+                      onClick={() => pause.mutate(job.job_id)}
+                    >
+                      暂停
+                    </Button>
+                  ) : null}
+                  {job.status === 'PAUSING' ? (
+                    <Button size="small" icon={<PauseCircleOutlined />} loading disabled>
+                      暂停
+                    </Button>
+                  ) : null}
+                  {job.status === 'PAUSED' ? (
+                    <Button
+                      size="small"
+                      type="primary"
+                      icon={<PlayCircleOutlined />}
+                      loading={resume.isPending && resume.variables === job.job_id}
+                      onClick={() => resume.mutate(job.job_id)}
+                    >
+                      继续
+                    </Button>
+                  ) : null}
                   {job.status === 'FAILED' && (
                     <Button size="small" loading={retry.isPending && retry.variables?.job_id === job.job_id}
                       onClick={() => retry.mutate(job)}>
                       重试
                     </Button>
                   )}
+                  <Popconfirm
+                    title="删除导出任务"
+                    description={isActive ? '请先暂停任务，再执行删除。' : '任务记录和已生成文件将一并删除。'}
+                    okText="删除"
+                    cancelText="取消"
+                    okButtonProps={{ danger: true }}
+                    disabled={isActive}
+                    onConfirm={() => remove.mutate(job.job_id)}
+                  >
+                    <Tooltip title={isActive ? '请先暂停任务' : '删除任务'}>
+                      <Button
+                        danger
+                        size="small"
+                        icon={<DeleteOutlined />}
+                        disabled={isActive}
+                        loading={remove.isPending && remove.variables === job.job_id}
+                        aria-label="删除任务"
+                      />
+                    </Tooltip>
+                  </Popconfirm>
                 </Space>
               );
             },

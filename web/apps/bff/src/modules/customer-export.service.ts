@@ -1,6 +1,6 @@
-import { Inject, Injectable, OnModuleInit } from '@nestjs/common';
+import { HttpException, HttpStatus, Inject, Injectable, OnModuleInit } from '@nestjs/common';
 import { createWriteStream } from 'node:fs';
-import { mkdir, rm } from 'node:fs/promises';
+import { mkdir, readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import archiver from 'archiver';
 import ExcelJS from 'exceljs';
@@ -34,6 +34,18 @@ interface ResidentExportGroup {
   province: string | null;
   city: string | null;
   _count: { _all: number };
+}
+
+class ExportPauseRequested extends Error {
+  constructor() {
+    super('export_pause_requested');
+  }
+}
+
+class ExportOwnershipLost extends Error {
+  constructor() {
+    super('export_ownership_lost');
+  }
 }
 
 export interface ExportFilePlan {
@@ -107,12 +119,24 @@ function serializeJob(job: {
 @Injectable()
 export class CustomerExportService implements OnModuleInit {
   private readonly active = new Set<string>();
+  private readonly pauseRequests = new Set<string>();
   private readonly queue: string[] = [];
   private draining = false;
 
   constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {}
 
   async onModuleInit(): Promise<void> {
+    const pausing = await this.prisma.exportJob.findMany({
+      where: { status: 'PAUSING' },
+      select: { job_id: true },
+    });
+    if (pausing.length > 0) {
+      await this.prisma.exportJob.updateMany({
+        where: { job_id: { in: pausing.map((job) => job.job_id) }, status: 'PAUSING' },
+        data: { status: 'PAUSED' },
+      });
+      await Promise.all(pausing.map((job) => this.cleanupArtifacts(job.job_id)));
+    }
     const interrupted = await this.prisma.exportJob.findMany({
       where: { status: { in: ['PENDING', 'RUNNING'] } },
       select: { job_id: true },
@@ -160,12 +184,115 @@ export class CustomerExportService implements OnModuleInit {
     return { path: job.file_path, filename: job.file_name };
   }
 
+  async pause(jobId: string): Promise<ExportJob | null> {
+    const job = await this.prisma.exportJob.findUnique({ where: { job_id: jobId } });
+    if (!job) return null;
+    if (job.status === 'PAUSED' || job.status === 'PAUSING') return serializeJob(job);
+    if (job.status === 'PENDING') {
+      const paused = await this.prisma.exportJob.updateMany({
+        where: { job_id: jobId, status: 'PENDING' },
+        data: { status: 'PAUSED' },
+      });
+      if (paused.count === 0) return this.pause(jobId);
+      this.removeFromQueue(jobId);
+      await this.cleanupArtifacts(jobId);
+      return this.get(jobId);
+    }
+    if (job.status === 'RUNNING') {
+      this.pauseRequests.add(jobId);
+      const pausing = await this.prisma.exportJob.updateMany({
+        where: { job_id: jobId, status: 'RUNNING' },
+        data: { status: 'PAUSING' },
+      });
+      if (pausing.count === 0) {
+        this.pauseRequests.delete(jobId);
+        return this.pause(jobId);
+      }
+      return this.get(jobId);
+    }
+    throw new HttpException(
+      { code: 40905, message: 'export_job_not_pauseable' },
+      HttpStatus.CONFLICT,
+    );
+  }
+
+  async resume(jobId: string): Promise<ExportJob | null> {
+    const job = await this.prisma.exportJob.findUnique({ where: { job_id: jobId } });
+    if (!job) return null;
+    if (job.status !== 'PAUSED') {
+      throw new HttpException(
+        { code: 40906, message: 'export_job_not_resumable' },
+        HttpStatus.CONFLICT,
+      );
+    }
+    await this.cleanupArtifacts(jobId);
+    const resumed = await this.prisma.exportJob.updateMany({
+      where: { job_id: jobId, status: 'PAUSED' },
+      data: {
+        status: 'PENDING',
+        file_path: null,
+        file_name: null,
+        total_rows: 0,
+        processed_rows: 0,
+        groups: 0,
+        completed_groups: 0,
+        error: null,
+        started_at: null,
+        finished_at: null,
+        expires_at: null,
+      },
+    });
+    if (resumed.count === 0) {
+      throw new HttpException(
+        { code: 40906, message: 'export_job_not_resumable' },
+        HttpStatus.CONFLICT,
+      );
+    }
+    this.schedule(jobId);
+    return this.get(jobId);
+  }
+
+  async remove(jobId: string): Promise<boolean> {
+    const job = await this.prisma.exportJob.findUnique({
+      where: { job_id: jobId },
+      select: { status: true },
+    });
+    if (!job) return false;
+    if (job.status === 'RUNNING' || job.status === 'PAUSING') {
+      throw new HttpException(
+        { code: 40907, message: 'pause_export_before_delete' },
+        HttpStatus.CONFLICT,
+      );
+    }
+    this.removeFromQueue(jobId);
+    const deleted = await this.prisma.exportJob.deleteMany({
+      where: {
+        job_id: jobId,
+        status: { in: ['PENDING', 'PAUSED', 'SUCCESS', 'FAILED'] },
+      },
+    });
+    if (deleted.count === 0) {
+      throw new HttpException(
+        { code: 40907, message: 'pause_export_before_delete' },
+        HttpStatus.CONFLICT,
+      );
+    }
+    await this.cleanupArtifacts(jobId);
+    return true;
+  }
+
   private schedule(jobId: string): void {
     if (this.active.has(jobId) || this.queue.includes(jobId)) return;
     this.queue.push(jobId);
     setImmediate(() => {
       void this.drain().catch(() => undefined);
     });
+  }
+
+  private removeFromQueue(jobId: string): void {
+    for (let index = this.queue.length - 1; index >= 0; index -= 1) {
+      if (this.queue[index] === jobId) this.queue.splice(index, 1);
+    }
   }
 
   private async drain(): Promise<void> {
@@ -190,26 +317,42 @@ export class CustomerExportService implements OnModuleInit {
 
   private async run(jobId: string): Promise<void> {
     const job = await this.prisma.exportJob.findUnique({ where: { job_id: jobId } });
-    if (!job) return;
+    if (!job || job.status !== 'PENDING') return;
+    const startedAt = new Date();
+    const claimed = await this.prisma.exportJob.updateMany({
+      where: { job_id: jobId, status: 'PENDING' },
+      data: {
+        status: 'RUNNING',
+        file_path: null,
+        file_name: null,
+        started_at: startedAt,
+        finished_at: null,
+        expires_at: null,
+        error: null,
+        total_rows: 0,
+        processed_rows: 0,
+        groups: 0,
+        completed_groups: 0,
+      },
+    });
+    if (claimed.count === 0) return;
     const filters = job.filters as CustomerListQuery;
     const where = customerWhere(filters);
     const dataDir = process.env.DATA_DIR ?? join(process.cwd(), '.data');
     const exportsDir = join(dataDir, 'exports');
-    const workDir = join(exportsDir, `${jobId}.work`);
-    const zipPath = join(exportsDir, `${jobId}.zip`);
+    const attemptId = ulid();
+    const workDir = join(exportsDir, `${jobId}.${attemptId}.work`);
+    const zipPath = join(exportsDir, `${jobId}.${attemptId}.zip`);
     const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
     const filename = `customers-export-${stamp}.zip`;
 
     await mkdir(workDir, { recursive: true });
-    await this.prisma.exportJob.update({
-      where: { job_id: jobId },
-      data: {
-        status: 'RUNNING', started_at: new Date(), finished_at: null, error: null,
-        total_rows: 0, processed_rows: 0, groups: 0, completed_groups: 0,
-      },
-    });
+    let output: ReturnType<typeof createWriteStream> | undefined;
+    let archive: ReturnType<typeof archiver> | undefined;
+    let archiveDone: Promise<void> | undefined;
 
     try {
+      await this.assertRunning(jobId, startedAt);
       const [residentGroups, nonResidentCount] = await Promise.all([
         this.prisma.customer.groupBy({
           by: ['province', 'city'],
@@ -223,45 +366,51 @@ export class CustomerExportService implements OnModuleInit {
       ]);
       const plans = buildExportFilePlans(residentGroups, nonResidentCount);
       const totalRows = plans.reduce((sum, plan) => sum + plan.count, 0);
-      await this.prisma.exportJob.update({
-        where: { job_id: jobId },
+      await this.prisma.exportJob.updateMany({
+        where: { job_id: jobId, status: 'RUNNING', started_at: startedAt },
         data: { total_rows: totalRows, groups: plans.length },
       });
-      const output = createWriteStream(zipPath, { flags: 'w', mode: 0o600 });
-      const archive = archiver('zip', { zlib: { level: 6 } });
-      const archiveDone = new Promise<void>((resolve, reject) => {
-        output.on('close', resolve);
-        output.on('error', reject);
-        archive.on('error', reject);
+      const outputStream = createWriteStream(zipPath, { flags: 'w', mode: 0o600 });
+      const zipArchive = archiver('zip', { zlib: { level: 6 } });
+      output = outputStream;
+      archive = zipArchive;
+      archiveDone = new Promise<void>((resolve, reject) => {
+        outputStream.on('close', resolve);
+        outputStream.on('error', reject);
+        zipArchive.on('error', reject);
       });
-      archive.pipe(output);
+      void archiveDone.catch(() => undefined);
+      zipArchive.pipe(outputStream);
 
       let processedRows = 0;
       for (let index = 0; index < plans.length; index += 1) {
+        await this.assertRunning(jobId, startedAt);
         const plan = plans[index];
         const xlsxPath = join(workDir, `${String(index).padStart(5, '0')}.xlsx`);
         const fileWhere: Prisma.CustomerWhereInput = plan.kind === 'resident_city'
           ? { AND: [where, { id_type: 'resident_id' }, { province: plan.province }, { city: plan.city }] }
           : { AND: [where, { id_type: { not: 'resident_id' } }] };
-        await this.writeWorkbook(xlsxPath, fileWhere, async (fileRows) => {
-          await this.prisma.exportJob.update({
-            where: { job_id: jobId },
+        await this.writeWorkbook(jobId, startedAt, xlsxPath, fileWhere, async (fileRows) => {
+          await this.prisma.exportJob.updateMany({
+            where: { job_id: jobId, status: 'RUNNING', started_at: startedAt },
             data: { processed_rows: processedRows + fileRows },
           });
         });
+        await this.assertRunning(jobId, startedAt);
         archive.file(xlsxPath, { name: plan.archiveName });
         processedRows += plan.count;
-        await this.prisma.exportJob.update({
-          where: { job_id: jobId },
+        await this.prisma.exportJob.updateMany({
+          where: { job_id: jobId, status: 'RUNNING', started_at: startedAt },
           data: { processed_rows: processedRows, completed_groups: index + 1 },
         });
       }
 
       await archive.finalize();
       await archiveDone;
+      await this.assertRunning(jobId, startedAt);
       await rm(workDir, { recursive: true, force: true });
-      await this.prisma.exportJob.update({
-        where: { job_id: jobId },
+      const completed = await this.prisma.exportJob.updateMany({
+        where: { job_id: jobId, status: 'RUNNING', started_at: startedAt },
         data: {
           status: 'SUCCESS',
           file_path: zipPath,
@@ -274,82 +423,158 @@ export class CustomerExportService implements OnModuleInit {
           expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000),
         },
       });
+      if (completed.count === 0) throw new ExportPauseRequested();
     } catch (error) {
+      archive?.abort();
+      output?.destroy();
       await rm(workDir, { recursive: true, force: true });
       await rm(zipPath, { force: true });
-      await this.prisma.exportJob.update({
+      if (error instanceof ExportOwnershipLost) return;
+      const current = await this.prisma.exportJob.findUnique({
         where: { job_id: jobId },
+        select: { status: true, started_at: true },
+      });
+      if (
+        error instanceof ExportPauseRequested
+        || (
+          current?.started_at?.getTime() === startedAt.getTime()
+          && (current.status === 'PAUSING' || current.status === 'PAUSED')
+        )
+      ) {
+        await this.prisma.exportJob.updateMany({
+          where: {
+            job_id: jobId,
+            status: { in: ['RUNNING', 'PAUSING'] },
+            started_at: startedAt,
+          },
+          data: {
+            status: 'PAUSED',
+            file_path: null,
+            file_name: null,
+            error: null,
+            finished_at: null,
+            expires_at: null,
+          },
+        });
+        return;
+      }
+      await this.prisma.exportJob.updateMany({
+        where: { job_id: jobId, status: 'RUNNING', started_at: startedAt },
         data: {
           status: 'FAILED',
           error: error instanceof Error ? error.message : String(error),
           finished_at: new Date(),
         },
       });
+    } finally {
+      this.pauseRequests.delete(jobId);
     }
   }
 
+  private async assertRunning(jobId: string, startedAt: Date): Promise<void> {
+    if (this.pauseRequests.has(jobId)) throw new ExportPauseRequested();
+    const job = await this.prisma.exportJob.findUnique({
+      where: { job_id: jobId },
+      select: { status: true, started_at: true },
+    });
+    if (job?.started_at?.getTime() !== startedAt.getTime()) throw new ExportOwnershipLost();
+    if (job?.status === 'RUNNING') return;
+    if (job?.status === 'PAUSING' || job?.status === 'PAUSED') {
+      throw new ExportPauseRequested();
+    }
+    throw new Error('export_job_stopped');
+  }
+
+  private async cleanupArtifacts(jobId: string): Promise<void> {
+    const dataDir = process.env.DATA_DIR ?? join(process.cwd(), '.data');
+    const exportsDir = join(dataDir, 'exports');
+    let names: string[];
+    try {
+      names = await readdir(exportsDir);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw error;
+    }
+    await Promise.all(names
+      .filter((name) => name === `${jobId}.work`
+        || name === `${jobId}.zip`
+        || name.startsWith(`${jobId}.`))
+      .map((name) => rm(join(exportsDir, name), { recursive: true, force: true })));
+  }
+
   private async writeWorkbook(
+    jobId: string,
+    startedAt: Date,
     path: string,
     where: Prisma.CustomerWhereInput,
     onProgress?: (writtenRows: number) => Promise<void>,
   ): Promise<void> {
+    const workbookOutput = createWriteStream(path, { flags: 'w', mode: 0o600 });
     const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
-      filename: path,
+      stream: workbookOutput,
       useSharedStrings: false,
       useStyles: false,
     });
-    const sheet = workbook.addWorksheet('customers');
-    sheet.columns = EXPORT_COLUMNS.map((column) => ({
-      header: column.header,
-      key: column.key,
-      width: column.width,
-    }));
-    let cursor: string | undefined;
-    let writtenRows = 0;
-    let reportedRows = 0;
+    try {
+      const sheet = workbook.addWorksheet('customers');
+      sheet.columns = EXPORT_COLUMNS.map((column) => ({
+        header: column.header,
+        key: column.key,
+        width: column.width,
+      }));
+      let cursor: string | undefined;
+      let writtenRows = 0;
+      let reportedRows = 0;
 
-    for (;;) {
-      const rows = await this.prisma.customer.findMany({
-        where: {
-          AND: [
-            where,
-            ...(cursor ? [{ customer_id: { lt: cursor } }] : []),
-          ],
-        },
-        orderBy: { customer_id: 'desc' },
-        take: 1000,
-      });
-      if (rows.length === 0) break;
-      for (const customer of rows) {
-        sheet.addRow({
-          huji_no: customer.huji_no ?? '',
-          name: customer.name,
-          id_type: DOCUMENT_TYPES[customer.id_type as DocumentType] ?? customer.id_type,
-          id_card: customer.id_card ?? '',
-          birth_date: customer.birth_date?.toISOString().slice(0, 10) ?? '',
-          gender: customer.gender === 'M' ? '男' : customer.gender === 'F' ? '女' : '未知',
-          phone_masked: customer.phone_masked ?? '',
-          province: customer.province ?? '',
-          city: customer.city ?? '',
-          district: customer.district ?? '',
-          address: customer.address ?? '',
-          occupation: customer.occupation ?? '',
-          education: customer.education ?? '',
-          marital_status: customer.marital_status ?? '',
-          stat_time: customer.stat_time?.toISOString().slice(0, 10) ?? '',
-          ingest_batch: customer.ingest_batch ?? '',
-        }).commit();
+      for (;;) {
+        await this.assertRunning(jobId, startedAt);
+        const rows = await this.prisma.customer.findMany({
+          where: {
+            AND: [
+              where,
+              ...(cursor ? [{ customer_id: { lt: cursor } }] : []),
+            ],
+          },
+          orderBy: { customer_id: 'desc' },
+          take: 1000,
+        });
+        if (rows.length === 0) break;
+        for (const customer of rows) {
+          sheet.addRow({
+            huji_no: customer.huji_no ?? '',
+            name: customer.name,
+            id_type: DOCUMENT_TYPES[customer.id_type as DocumentType] ?? customer.id_type,
+            id_card: customer.id_card ?? '',
+            birth_date: customer.birth_date?.toISOString().slice(0, 10) ?? '',
+            gender: customer.gender === 'M' ? '男' : customer.gender === 'F' ? '女' : '未知',
+            phone_masked: customer.phone_masked ?? '',
+            province: customer.province ?? '',
+            city: customer.city ?? '',
+            district: customer.district ?? '',
+            address: customer.address ?? '',
+            occupation: customer.occupation ?? '',
+            education: customer.education ?? '',
+            marital_status: customer.marital_status ?? '',
+            stat_time: customer.stat_time?.toISOString().slice(0, 10) ?? '',
+            ingest_batch: customer.ingest_batch ?? '',
+          }).commit();
+        }
+        writtenRows += rows.length;
+        if (onProgress && writtenRows - reportedRows >= 10_000) {
+          await onProgress(writtenRows);
+          reportedRows = writtenRows;
+        }
+        cursor = rows.at(-1)?.customer_id;
       }
-      writtenRows += rows.length;
-      if (onProgress && writtenRows - reportedRows >= 10_000) {
-        await onProgress(writtenRows);
-        reportedRows = writtenRows;
-      }
-      cursor = rows.at(-1)?.customer_id;
+
+      await sheet.commit();
+      await workbook.commit();
+      if (onProgress && writtenRows !== reportedRows) await onProgress(writtenRows);
+    } catch (error) {
+      const workbookArchive = (workbook as unknown as { zip?: { abort(): void } }).zip;
+      workbookArchive?.abort();
+      workbookOutput.destroy();
+      throw error;
     }
-
-    await sheet.commit();
-    await workbook.commit();
-    if (onProgress && writtenRows !== reportedRows) await onProgress(writtenRows);
   }
 }

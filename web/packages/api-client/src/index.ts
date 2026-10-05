@@ -115,6 +115,12 @@ export class LeadOpsClient {
       this.unwrap<ExportJob[]>(this.http.get('customer/exports', { searchParams: { limit } })),
     exportStatus: (jobId: string) =>
       this.unwrap<ExportJob>(this.http.get(`customer/exports/${jobId}`)),
+    pauseExport: (jobId: string) =>
+      this.unwrap<ExportJob>(this.http.post(`customer/exports/${jobId}/pause`)),
+    resumeExport: (jobId: string) =>
+      this.unwrap<ExportJob>(this.http.post(`customer/exports/${jobId}/resume`)),
+    removeExport: (jobId: string) =>
+      this.unwrap<{ ok: boolean }>(this.http.delete(`customer/exports/${jobId}`)),
     downloadExport: async (job: ExportJob): Promise<{ blob: Blob; filename: string }> => {
       const url = new URL(`customer/exports/${job.job_id}/download`, this.opts.baseUrl);
       const token = this.opts.getToken?.();

@@ -213,6 +213,36 @@ export class CustomerController {
     return this.exports.list(limit);
   }
 
+  @Post('exports/:jobId/pause')
+  @Roles('admin', 'operator')
+  async pauseExport(@Param('jobId') jobId: string): Promise<ExportJob> {
+    const job = await this.exports.pause(jobId);
+    if (!job) {
+      throw new HttpException({ code: 40401, message: 'not_found' }, HttpStatus.NOT_FOUND);
+    }
+    return job;
+  }
+
+  @Post('exports/:jobId/resume')
+  @Roles('admin', 'operator')
+  async resumeExport(@Param('jobId') jobId: string): Promise<ExportJob> {
+    const job = await this.exports.resume(jobId);
+    if (!job) {
+      throw new HttpException({ code: 40401, message: 'not_found' }, HttpStatus.NOT_FOUND);
+    }
+    return job;
+  }
+
+  @Delete('exports/:jobId')
+  @Roles('admin', 'operator')
+  async removeExport(@Param('jobId') jobId: string): Promise<{ ok: boolean }> {
+    const removed = await this.exports.remove(jobId);
+    if (!removed) {
+      throw new HttpException({ code: 40401, message: 'not_found' }, HttpStatus.NOT_FOUND);
+    }
+    return { ok: true };
+  }
+
   @Get('exports/:jobId/download')
   @Roles('admin', 'operator')
   async downloadExport(
