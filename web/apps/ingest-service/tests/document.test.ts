@@ -23,6 +23,22 @@ describe('document normalization and admission', () => {
     }
   });
 
+  it('removes left single quotes from resident IDs and derives their attributes', () => {
+    expect(normalizeDocument('‘11010519491231002x')).toEqual({
+      value: '11010519491231002X', type: 'resident_id', warnings: ['id_card_left_quote_removed'],
+    });
+    const cleaned = cleanRowDetailed(['张三', '‘11010519491231002x'], schema, ctx);
+    expect(cleaned.row).toMatchObject({
+      id_card: '11010519491231002X',
+      id_type: 'resident_id',
+      birth_date: '1949-12-31',
+      gender: 'F',
+      province: '北京市',
+      city: '北京市',
+    });
+    expect(cleaned.warnings).toContain('id_card_left_quote_removed');
+  });
+
   it.each([
     ['５６４３２４５４－５', 'organization_code', '564324545'],
     ['564324545', 'organization_code', '564324545'],

@@ -127,6 +127,7 @@ export function normalizeDocument(raw: unknown, requestedType?: unknown): Normal
   if (selected === 'resident_id') {
     value = resident.value;
     if (wrapped) warnings.push('id_card_hash_wrapper_removed');
+    if (residentRaw.includes('\u2018')) warnings.push('id_card_left_quote_removed');
   } else if (selected === 'organization_code') {
     value = orgValue;
   } else if (selected === 'mainland_permit' && text.length === 11) {

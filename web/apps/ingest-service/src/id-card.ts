@@ -7,7 +7,7 @@
  * 兼容：
  *   - 15 位老身份证（1980s 前）自动补成 18 位
  *   - 17 位身份证主体自动补校验位
- *   - 空格 / 全角数字 / 软连字符 / 小写 x 做清洗
+ *   - 空格 / 左单引号 / 全角数字 / 软连字符 / 小写 x 做清洗
  *   - 历史 GB2260 代码（已撤销/合并）自动回落
  */
 import { readFileSync } from 'fs';
@@ -147,11 +147,11 @@ export interface NormalizedIdCard {
   correctedBirthDate?: string;
 }
 
-/** 输入清洗：去空格 / 全角数字 → 半角 / 软连字符 → 空 / 小写 x → X */
+/** 输入清洗：去空格 / 左单引号 / 软连字符，全角数字 → 半角，小写 x → X */
 export function sanitizeIdCard(raw: unknown): string {
   if (raw == null) return '';
   let s = String(raw).trim();
-  s = s.replace(/[\s\u00A0\u3000\u200B\u200C\u200D-]/g, '');
+  s = s.replace(/[\s\u00A0\u3000\u200B\u200C\u200D\u2018-]/g, '');
   s = s.replace(/[０-９]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0));
   s = s.replace(/[xｘ]/g, 'X');
   return s;
