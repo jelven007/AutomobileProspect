@@ -369,7 +369,7 @@ export function CustomerImportModal({
                       {k === 'id_card_city_unknown' && <>（身份证前 4 位未匹配到城市）</>}
                       {k === 'id_card_province_unknown' && <>（身份证前 2 位未匹配到省份）</>}
                       {k === 'id_card_birth_date_corrected' && <>（身份证中的非法日期已向前修正，并重新计算校验位）</>}
-                      {k === 'id_card_checksum_invalid' && <>（身份证校验位失败，仍已入库）</>}
+                      {k === 'id_card_checksum_invalid' && <>（身份证校验位错误，已自动修正后入库）</>}
                       {k === 'id_card_hash_wrapper_removed' && <>（有效身份证两侧的 # 已去除）</>}
                       {k === 'document_issue_suffix_removed' && <>（回乡证换证次数后缀已移除，使用终身证件号码匹配）</>}
                       {k === 'document_type_pending_verification' && <>（号码存在类型歧义，已按「证件类型待核实」保存，请核实后修改类型）</>}

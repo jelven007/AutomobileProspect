@@ -132,7 +132,7 @@ describe('identity admission before deduplication', () => {
   it('accepts lowercase x, historical/unknown districts and bad checksums with warnings', () => {
     expect(cleanRow(['客户', '11010519491231002x'], identitySchema, ctx).id_card).toBe('11010519491231002X');
     const { row, warnings } = cleanRowDetailed(['客户', '999999197410137219'], identitySchema, ctx);
-    expect(row.id_card).toBe('999999197410137219');
+    expect(row.id_card).toBe('999999197410137211');
     expect(row.province).toBe('其他');
     expect(warnings).toContain('id_card_province_unknown');
     expect(cleanRowDetailed(['客户', '510223197410137210'], identitySchema, ctx).warnings)
@@ -231,15 +231,15 @@ describe('cleanRowDetailed', () => {
       .toThrowError('value_too_long:phone_masked:64');
   });
 
-  it('emits id_card_checksum_invalid when check digit is wrong', () => {
+  it('corrects a wrong check digit and emits id_card_checksum_invalid', () => {
     // 510223197410137219 的末位本是 9，这里改为 0 制造校验失败
     const row = ['派出所户籍站', '2016/02/26 16:51:34', '户籍地址：有效', '2016户籍统计9161337',
       '1974/10/13', '男', '510223197410137210', '谭陆友', '13368168284',
       '重庆市綦江县赶水镇太公村4组', '2', '8'];
     const { row: cleaned, warnings } = cleanRowDetailed(row, schema, ctx);
     expect(warnings).toContain('id_card_checksum_invalid');
-    expect(cleaned.huji_no).toBe('9161337');  // 清洗仍成功，身份证明文入库
-    expect(cleaned.id_card).toBe('510223197410137210');
+    expect(cleaned.huji_no).toBe('9161337');
+    expect(cleaned.id_card).toBe('510223197410137219');
   });
 
   it('corrects an impossible id_card birth date backwards before storage', () => {

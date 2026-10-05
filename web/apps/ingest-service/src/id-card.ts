@@ -143,6 +143,7 @@ export interface IdCardInfo {
 export interface NormalizedIdCard {
   value: string;
   birthDateCorrected: boolean;
+  checksumCorrected?: boolean;
   originalBirthDate?: string;
   correctedBirthDate?: string;
 }
@@ -233,6 +234,7 @@ export function normalizeIdCardForStorage(raw: unknown): NormalizedIdCard {
   }
   let body: string;
   let originalValue = sanitized;
+  let checksumCorrected = false;
   if (/^\d{15}$/.test(sanitized)) {
     body = sanitized.slice(0, 6) + '19' + sanitized.slice(6);
     originalValue = body + checksumForBody(body);
@@ -241,6 +243,9 @@ export function normalizeIdCardForStorage(raw: unknown): NormalizedIdCard {
     originalValue = body + checksumForBody(body);
   } else if (/^\d{17}[\dX]$/.test(sanitized)) {
     body = sanitized.slice(0, 17);
+    const expectedChecksum = checksumForBody(body);
+    checksumCorrected = sanitized[17] !== expectedChecksum;
+    originalValue = body + expectedChecksum;
   } else {
     return { value: sanitized, birthDateCorrected: false };
   }
@@ -251,6 +256,7 @@ export function normalizeIdCardForStorage(raw: unknown): NormalizedIdCard {
       ? normalized.body + checksumForBody(normalized.body)
       : originalValue,
     birthDateCorrected: normalized.corrected,
+    ...(!normalized.corrected && checksumCorrected ? { checksumCorrected: true } : {}),
     originalBirthDate: normalized.originalBirthDate,
     correctedBirthDate: normalized.correctedBirthDate,
   };
@@ -331,6 +337,6 @@ export function parseIdCard(value: unknown): IdCardInfo {
   const seq = Number(s.slice(16, 17));
   if (!Number.isNaN(seq)) info.gender = seq % 2 === 1 ? 'M' : 'F';
 
-  info.checksum_valid = validateIdCard(s);
+  info.checksum_valid = normalized.checksumCorrected ? false : validateIdCard(s);
   return info;
 }

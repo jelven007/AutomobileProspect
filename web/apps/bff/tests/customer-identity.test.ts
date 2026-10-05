@@ -81,11 +81,11 @@ describe('identity admission at API and batch write boundaries', () => {
     });
   });
 
-  it('continues accepting a wrong checksum at the manual API boundary', async () => {
+  it('corrects a wrong checksum at the manual API boundary', async () => {
     const { controller } = setup();
     const result = await controller.create({
       name: '客户', id_card: '510223197410137210',
     }, { headers: {} });
-    expect(result.id_card).toBe('510223197410137210');
+    expect(result.id_card).toBe('510223197410137219');
   });
 });
