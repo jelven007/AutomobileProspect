@@ -396,8 +396,8 @@ describe.sequential('CustomerService PostgreSQL integration', () => {
         status: 'SUCCESS',
         total_rows: 3,
         processed_rows: 3,
-        groups: 3,
-        completed_groups: 3,
+        groups: 2,
+        completed_groups: 2,
         requested_by: 'integration-test',
         filters: { q: batch },
       });

@@ -1,33 +1,34 @@
 import { describe, expect, it } from 'vitest';
-import { buildExportFilePlans } from '../src/modules/customer-export.service';
+import {
+  buildExportFilePlans,
+  EXCEL_DATA_ROWS_PER_SHEET,
+  exportWorksheetName,
+} from '../src/modules/customer-export.service';
 
 describe('customer export grouping', () => {
-  it('splits resident IDs by city and combines every non-resident type', () => {
+  it('splits resident IDs by province and combines every non-resident type', () => {
     expect(buildExportFilePlans([
-      { province: '江苏省', city: '苏州市', _count: { _all: 12 } },
-      { province: '江苏省', city: '南京市', _count: { _all: 8 } },
-      { province: null, city: null, _count: { _all: 3 } },
+      { province: '江苏省', _count: { _all: 20 } },
+      { province: '浙江省', _count: { _all: 8 } },
+      { province: null, _count: { _all: 3 } },
     ], 21)).toEqual([
       {
-        kind: 'resident_city',
-        archiveName: '江苏省-苏州市-12条.xlsx',
-        count: 12,
+        kind: 'resident_province',
+        archiveName: '江苏省-20条.xlsx',
+        count: 20,
         province: '江苏省',
-        city: '苏州市',
       },
       {
-        kind: 'resident_city',
-        archiveName: '江苏省-南京市-8条.xlsx',
+        kind: 'resident_province',
+        archiveName: '浙江省-8条.xlsx',
         count: 8,
-        province: '江苏省',
-        city: '南京市',
+        province: '浙江省',
       },
       {
-        kind: 'resident_city',
-        archiveName: '未知省份-未知城市-3条.xlsx',
+        kind: 'resident_province',
+        archiveName: '未知省份-3条.xlsx',
         count: 3,
         province: null,
-        city: null,
       },
       {
         kind: 'non_resident',
@@ -39,5 +40,11 @@ describe('customer export grouping', () => {
 
   it('does not create an empty non-resident file', () => {
     expect(buildExportFilePlans([], 0)).toEqual([]);
+  });
+
+  it('uses additional worksheets without exceeding the Excel row limit', () => {
+    expect(EXCEL_DATA_ROWS_PER_SHEET).toBe(1_048_575);
+    expect(exportWorksheetName(0)).toBe('customers');
+    expect(exportWorksheetName(1)).toBe('customers-2');
   });
 });

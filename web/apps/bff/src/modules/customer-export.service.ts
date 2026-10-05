@@ -29,10 +29,14 @@ const EXPORT_COLUMNS: Array<{ header: string; key: keyof Customer; width: number
   { header: '统计时间', key: 'stat_time', width: 12 },
   { header: '入库批次', key: 'ingest_batch', width: 20 },
 ];
+export const EXCEL_DATA_ROWS_PER_SHEET = 1_048_575;
 
-interface ResidentExportGroup {
+export function exportWorksheetName(index: number): string {
+  return index === 0 ? 'customers' : `customers-${index + 1}`;
+}
+
+interface ResidentProvinceExportGroup {
   province: string | null;
-  city: string | null;
   _count: { _all: number };
 }
 
@@ -49,27 +53,24 @@ class ExportOwnershipLost extends Error {
 }
 
 export interface ExportFilePlan {
-  kind: 'resident_city' | 'non_resident';
+  kind: 'resident_province' | 'non_resident';
   archiveName: string;
   count: number;
   province?: string | null;
-  city?: string | null;
 }
 
 export function buildExportFilePlans(
-  residentGroups: ResidentExportGroup[],
+  residentGroups: ResidentProvinceExportGroup[],
   nonResidentCount: number,
 ): ExportFilePlan[] {
   const plans: ExportFilePlan[] = residentGroups.map((group) => {
     const province = group.province ?? '未知省份';
-    const city = group.city ?? '未知城市';
-    const archiveName = `${province}-${city}-${group._count._all}条.xlsx`.replace(/[\\/:*?"<>|]/g, '_');
+    const archiveName = `${province}-${group._count._all}条.xlsx`.replace(/[\\/:*?"<>|]/g, '_');
     return {
-      kind: 'resident_city',
+      kind: 'resident_province',
       archiveName,
       count: group._count._all,
       province: group.province,
-      city: group.city,
     };
   });
   if (nonResidentCount > 0) {
@@ -355,10 +356,10 @@ export class CustomerExportService implements OnModuleInit {
       await this.assertRunning(jobId, startedAt);
       const [residentGroups, nonResidentCount] = await Promise.all([
         this.prisma.customer.groupBy({
-          by: ['province', 'city'],
+          by: ['province'],
           where: { AND: [where, { id_type: 'resident_id' }] },
           _count: { _all: true },
-          orderBy: [{ province: 'asc' }, { city: 'asc' }],
+          orderBy: [{ province: 'asc' }],
         }),
         this.prisma.customer.count({
           where: { AND: [where, { id_type: { not: 'resident_id' } }] },
@@ -387,8 +388,8 @@ export class CustomerExportService implements OnModuleInit {
         await this.assertRunning(jobId, startedAt);
         const plan = plans[index];
         const xlsxPath = join(workDir, `${String(index).padStart(5, '0')}.xlsx`);
-        const fileWhere: Prisma.CustomerWhereInput = plan.kind === 'resident_city'
-          ? { AND: [where, { id_type: 'resident_id' }, { province: plan.province }, { city: plan.city }] }
+        const fileWhere: Prisma.CustomerWhereInput = plan.kind === 'resident_province'
+          ? { AND: [where, { id_type: 'resident_id' }, { province: plan.province }] }
           : { AND: [where, { id_type: { not: 'resident_id' } }] };
         await this.writeWorkbook(jobId, startedAt, xlsxPath, fileWhere, async (fileRows) => {
           await this.prisma.exportJob.updateMany({
@@ -516,12 +517,18 @@ export class CustomerExportService implements OnModuleInit {
       useStyles: false,
     });
     try {
-      const sheet = workbook.addWorksheet('customers');
-      sheet.columns = EXPORT_COLUMNS.map((column) => ({
-        header: column.header,
-        key: column.key,
-        width: column.width,
-      }));
+      const addWorksheet = (index: number) => {
+        const nextSheet = workbook.addWorksheet(exportWorksheetName(index));
+        nextSheet.columns = EXPORT_COLUMNS.map((column) => ({
+          header: column.header,
+          key: column.key,
+          width: column.width,
+        }));
+        return nextSheet;
+      };
+      let sheetIndex = 0;
+      let sheetRows = 0;
+      let sheet = addWorksheet(sheetIndex);
       let cursor: string | undefined;
       let writtenRows = 0;
       let reportedRows = 0;
@@ -540,6 +547,12 @@ export class CustomerExportService implements OnModuleInit {
         });
         if (rows.length === 0) break;
         for (const customer of rows) {
+          if (sheetRows === EXCEL_DATA_ROWS_PER_SHEET) {
+            await sheet.commit();
+            sheetIndex += 1;
+            sheet = addWorksheet(sheetIndex);
+            sheetRows = 0;
+          }
           sheet.addRow({
             huji_no: customer.huji_no ?? '',
             name: customer.name,
@@ -558,6 +571,7 @@ export class CustomerExportService implements OnModuleInit {
             stat_time: customer.stat_time?.toISOString().slice(0, 10) ?? '',
             ingest_batch: customer.ingest_batch ?? '',
           }).commit();
+          sheetRows += 1;
         }
         writtenRows += rows.length;
         if (onProgress && writtenRows - reportedRows >= 10_000) {
