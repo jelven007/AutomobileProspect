@@ -128,6 +128,7 @@ export function normalizeDocument(raw: unknown, requestedType?: unknown): Normal
     value = resident.value;
     if (wrapped) warnings.push('id_card_hash_wrapper_removed');
     if (/[\u0027\u2018\u2019\uFF07]/.test(residentRaw)) warnings.push('id_card_quote_removed');
+    if (/[.\uFF0E\u3002]/.test(residentRaw)) warnings.push('id_card_decimal_suffix_removed');
   } else if (selected === 'organization_code') {
     value = orgValue;
   } else if (selected === 'mainland_permit' && text.length === 11) {

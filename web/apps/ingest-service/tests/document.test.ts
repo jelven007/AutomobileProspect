@@ -43,6 +43,32 @@ describe('document normalization and admission', () => {
   });
 
   it.each([
+    ['11010519491231002X.00', '11010519491231002X'],
+    ['11010519491231002X．123', '11010519491231002X'],
+    ['11010519491231002X。9', '11010519491231002X'],
+    ['11010519491231002.', '11010519491231002X'],
+  ])('removes the decimal suffix from resident ID %s', (input, value) => {
+    expect(normalizeDocument(input)).toEqual({
+      value,
+      type: 'resident_id',
+      warnings: ['id_card_decimal_suffix_removed'],
+    });
+  });
+
+  it('derives resident attributes after removing a decimal suffix', () => {
+    const cleaned = cleanRowDetailed(['张三', '11010519491231002X.001'], schema, ctx);
+    expect(cleaned.row).toMatchObject({
+      id_card: '11010519491231002X',
+      id_type: 'resident_id',
+      birth_date: '1949-12-31',
+      gender: 'F',
+      province: '北京市',
+      city: '北京市',
+    });
+    expect(cleaned.warnings).toContain('id_card_decimal_suffix_removed');
+  });
+
+  it.each([
     ['５６４３２４５４－５', 'organization_code', '564324545'],
     ['564324545', 'organization_code', '564324545'],
     ['91350211M000100Y46', 'credit_code', '91350211M000100Y46'],

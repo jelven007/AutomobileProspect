@@ -28,7 +28,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { CustomerService, type IngestRow } from './customer.service';
 
 const BATCH_SIZE = 1000;
-const IMPORT_PIPELINE_VERSION = 9;
+const IMPORT_PIPELINE_VERSION = 10;
 
 function loadSchema(): IngestSchema {
   const path = process.env.INGEST_SCHEMA_PATH
