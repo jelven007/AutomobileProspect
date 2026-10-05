@@ -126,7 +126,7 @@ export default function CustomerPage() {
       URL.revokeObjectURL(url);
       notification.success({
         message: '导出成功',
-        description: `共 ${job.total_rows} 条，已按省市拆分为 ${job.groups} 个 Excel（省份-城市-条数.xlsx），打包成 ZIP 下载至浏览器的「下载」目录`,
+        description: `共 ${job.total_rows} 条，生成 ${job.groups} 个 Excel：居民身份证按城市拆分，其他证件合并为一个文件，已打包成 ZIP 下载`,
         placement: 'topRight',
         duration: 6,
       });

@@ -30,6 +30,46 @@ const EXPORT_COLUMNS: Array<{ header: string; key: keyof Customer; width: number
   { header: '入库批次', key: 'ingest_batch', width: 20 },
 ];
 
+interface ResidentExportGroup {
+  province: string | null;
+  city: string | null;
+  _count: { _all: number };
+}
+
+export interface ExportFilePlan {
+  kind: 'resident_city' | 'non_resident';
+  archiveName: string;
+  count: number;
+  province?: string | null;
+  city?: string | null;
+}
+
+export function buildExportFilePlans(
+  residentGroups: ResidentExportGroup[],
+  nonResidentCount: number,
+): ExportFilePlan[] {
+  const plans: ExportFilePlan[] = residentGroups.map((group) => {
+    const province = group.province ?? '未知省份';
+    const city = group.city ?? '未知城市';
+    const archiveName = `${province}-${city}-${group._count._all}条.xlsx`.replace(/[\\/:*?"<>|]/g, '_');
+    return {
+      kind: 'resident_city',
+      archiveName,
+      count: group._count._all,
+      province: group.province,
+      city: group.city,
+    };
+  });
+  if (nonResidentCount > 0) {
+    plans.push({
+      kind: 'non_resident',
+      archiveName: `非居民身份证-${nonResidentCount}条.xlsx`,
+      count: nonResidentCount,
+    });
+  }
+  return plans;
+}
+
 function serializeJob(job: {
   job_id: string;
   status: string;
@@ -122,11 +162,18 @@ export class CustomerExportService implements OnModuleInit {
     });
 
     try {
-      const groups = await this.prisma.customer.groupBy({
-        by: ['province', 'city'],
-        where,
-        _count: { _all: true },
-      });
+      const [residentGroups, nonResidentCount] = await Promise.all([
+        this.prisma.customer.groupBy({
+          by: ['province', 'city'],
+          where: { AND: [where, { id_type: 'resident_id' }] },
+          _count: { _all: true },
+          orderBy: [{ province: 'asc' }, { city: 'asc' }],
+        }),
+        this.prisma.customer.count({
+          where: { AND: [where, { id_type: { not: 'resident_id' } }] },
+        }),
+      ]);
+      const plans = buildExportFilePlans(residentGroups, nonResidentCount);
       const output = createWriteStream(zipPath, { flags: 'w', mode: 0o600 });
       const archive = archiver('zip', { zlib: { level: 6 } });
       const archiveDone = new Promise<void>((resolve, reject) => {
@@ -137,21 +184,15 @@ export class CustomerExportService implements OnModuleInit {
       archive.pipe(output);
 
       let totalRows = 0;
-      for (let index = 0; index < groups.length; index += 1) {
-        const group = groups[index];
-        const province = group.province ?? '未知省份';
-        const city = group.city ?? '未知城市';
-        const count = group._count._all;
-        totalRows += count;
-        const safeName = `${province}-${city}-${count}条`.replace(/[\\/:*?"<>|]/g, '_');
+      for (let index = 0; index < plans.length; index += 1) {
+        const plan = plans[index];
+        totalRows += plan.count;
         const xlsxPath = join(workDir, `${String(index).padStart(5, '0')}.xlsx`);
-        await this.writeGroupWorkbook(
-          xlsxPath,
-          where,
-          group.province,
-          group.city,
-        );
-        archive.file(xlsxPath, { name: `${safeName}.xlsx` });
+        const fileWhere: Prisma.CustomerWhereInput = plan.kind === 'resident_city'
+          ? { AND: [where, { id_type: 'resident_id' }, { province: plan.province }, { city: plan.city }] }
+          : { AND: [where, { id_type: { not: 'resident_id' } }] };
+        await this.writeWorkbook(xlsxPath, fileWhere);
+        archive.file(xlsxPath, { name: plan.archiveName });
       }
 
       await archive.finalize();
@@ -164,7 +205,7 @@ export class CustomerExportService implements OnModuleInit {
           file_path: zipPath,
           file_name: filename,
           total_rows: totalRows,
-          groups: groups.length,
+          groups: plans.length,
           finished_at: new Date(),
           expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000),
         },
@@ -183,11 +224,9 @@ export class CustomerExportService implements OnModuleInit {
     }
   }
 
-  private async writeGroupWorkbook(
+  private async writeWorkbook(
     path: string,
-    baseWhere: Prisma.CustomerWhereInput,
-    province: string | null,
-    city: string | null,
+    where: Prisma.CustomerWhereInput,
   ): Promise<void> {
     const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
       filename: path,
@@ -206,9 +245,7 @@ export class CustomerExportService implements OnModuleInit {
       const rows = await this.prisma.customer.findMany({
         where: {
           AND: [
-            baseWhere,
-            { province },
-            { city },
+            where,
             ...(cursor ? [{ customer_id: { lt: cursor } }] : []),
           ],
         },
