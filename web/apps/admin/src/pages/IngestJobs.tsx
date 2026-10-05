@@ -12,6 +12,28 @@ const STATUS_COLOR: Record<IngestJob['status'], string> = {
   SUPERSEDED: 'default',
 };
 
+const CHINA_TIME_FORMATTER = new Intl.DateTimeFormat('zh-CN', {
+  timeZone: 'Asia/Shanghai',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  hourCycle: 'h23',
+});
+
+function formatChinaTime(value?: string): string {
+  if (!value) return '-';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '-';
+  const parts = Object.fromEntries(
+    CHINA_TIME_FORMATTER.formatToParts(date)
+      .filter((part) => part.type !== 'literal')
+      .map((part) => [part.type, part.value]),
+  );
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
+}
+
 export default function IngestJobsPage() {
   const qc = useQueryClient();
   const { data, isLoading } = useQuery({
@@ -35,14 +57,18 @@ export default function IngestJobsPage() {
   return (
     <PageContainer title="同步任务">
       <Table
+        className="ingest-jobs-table"
         rowKey="job_id"
         loading={isLoading}
         dataSource={data ?? []}
         pagination={false}
+        scroll={{ x: 'max-content' }}
         columns={[
-          { title: 'Job ID', dataIndex: 'job_id' },
+          { title: 'Job ID', dataIndex: 'job_id', width: 230, ellipsis: true },
           {
             title: '来源',
+            width: 220,
+            ellipsis: true,
             render: (_: unknown, j: IngestJob) => (
               j.file_name ?? [j.source_bucket, j.source_prefix].filter(Boolean).join('/') ?? '-'
             ),
@@ -58,8 +84,8 @@ export default function IngestJobsPage() {
           { title: '重复', dataIndex: 'updated_rows' },
           { title: '跳过', dataIndex: 'skipped_rows' },
           { title: 'Checkpoint', dataIndex: 'checkpoint_row' },
-          { title: '开始', dataIndex: 'started_at' },
-          { title: '结束', dataIndex: 'finished_at' },
+          { title: '开始', dataIndex: 'started_at', width: 150, render: formatChinaTime },
+          { title: '结束', dataIndex: 'finished_at', width: 150, render: formatChinaTime },
           {
             title: '操作',
             render: (_: unknown, j: IngestJob) => (

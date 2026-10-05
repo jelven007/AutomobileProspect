@@ -126,3 +126,8 @@ html, body, #root {
 .customer-table-nowrap .ant-table-tbody > tr > td .ant-space {
   flex-wrap: nowrap;
 }
+
+.ingest-jobs-table .ant-table-thead > tr > th,
+.ingest-jobs-table .ant-table-tbody > tr > td {
+  white-space: nowrap;
+}
