@@ -23,11 +23,14 @@ describe('document normalization and admission', () => {
     }
   });
 
-  it('removes left single quotes from resident IDs and derives their attributes', () => {
-    expect(normalizeDocument('‘11010519491231002x')).toEqual({
-      value: '11010519491231002X', type: 'resident_id', warnings: ['id_card_left_quote_removed'],
+  it.each(["'", '‘', '’', '＇'])('removes the %s quote variant from resident IDs', (quote) => {
+    expect(normalizeDocument(`${quote}11010519491231002x`)).toEqual({
+      value: '11010519491231002X', type: 'resident_id', warnings: ['id_card_quote_removed'],
     });
-    const cleaned = cleanRowDetailed(['张三', '‘11010519491231002x'], schema, ctx);
+  });
+
+  it('derives resident attributes after removing a quote prefix', () => {
+    const cleaned = cleanRowDetailed(['张三', "'11010519491231002x"], schema, ctx);
     expect(cleaned.row).toMatchObject({
       id_card: '11010519491231002X',
       id_type: 'resident_id',
@@ -36,7 +39,7 @@ describe('document normalization and admission', () => {
       province: '北京市',
       city: '北京市',
     });
-    expect(cleaned.warnings).toContain('id_card_left_quote_removed');
+    expect(cleaned.warnings).toContain('id_card_quote_removed');
   });
 
   it.each([

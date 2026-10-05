@@ -173,7 +173,7 @@ async function main(): Promise<void> {
         source_row: rowNo,
         ingest_batch: REPAIR_ID,
       });
-      assert(cleaned.warnings.includes('id_card_left_quote_removed'), `missing quote warning at row ${rowNo}`);
+      assert(cleaned.warnings.includes('id_card_quote_removed'), `missing quote warning at row ${rowNo}`);
       for (const warning of cleaned.warnings) warnings[warning] = (warnings[warning] ?? 0) + 1;
       repairRows.push(toRepairRow(old, cleaned.row as IngestRow));
     }
