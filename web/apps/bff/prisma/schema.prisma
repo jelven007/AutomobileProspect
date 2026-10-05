@@ -113,7 +113,9 @@ model ExportJob {
   file_path    String?
   file_name    String?   @db.VarChar(256)
   total_rows   BigInt    @default(0)
+  processed_rows BigInt  @default(0)
   groups       Int       @default(0)
+  completed_groups Int   @default(0)
   requested_by String?   @db.VarChar(128)
   error        String?
   created_at   DateTime  @default(now()) @db.Timestamptz(6)

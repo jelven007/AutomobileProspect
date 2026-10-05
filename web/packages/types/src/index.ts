@@ -164,7 +164,11 @@ export interface ExportJob {
   status: 'PENDING' | 'RUNNING' | 'SUCCESS' | 'FAILED';
   file_name?: string;
   total_rows: number;
+  processed_rows: number;
   groups: number;
+  completed_groups: number;
+  filters?: CustomerListQuery;
+  requested_by?: string;
   created_at: string;
   started_at?: string;
   finished_at?: string;

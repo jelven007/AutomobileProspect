@@ -205,6 +205,14 @@ export class CustomerController {
     return job;
   }
 
+  @Get('exports')
+  @Roles('admin', 'operator')
+  listExports(@Query('limit') limitValue?: string): Promise<ExportJob[]> {
+    const parsed = Number(limitValue ?? 100);
+    const limit = Number.isFinite(parsed) ? Math.floor(parsed) : 100;
+    return this.exports.list(limit);
+  }
+
   @Get('exports/:jobId/download')
   @Roles('admin', 'operator')
   async downloadExport(

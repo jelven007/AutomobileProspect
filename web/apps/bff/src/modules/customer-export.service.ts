@@ -75,7 +75,11 @@ function serializeJob(job: {
   status: string;
   file_name: string | null;
   total_rows: bigint;
+  processed_rows: bigint;
   groups: number;
+  completed_groups: number;
+  filters: Prisma.JsonValue;
+  requested_by: string | null;
   error: string | null;
   created_at: Date;
   started_at: Date | null;
@@ -87,7 +91,11 @@ function serializeJob(job: {
     status: job.status as ExportJob['status'],
     file_name: job.file_name ?? undefined,
     total_rows: Number(job.total_rows),
+    processed_rows: Number(job.processed_rows),
     groups: job.groups,
+    completed_groups: job.completed_groups,
+    filters: job.filters as CustomerListQuery,
+    requested_by: job.requested_by ?? undefined,
     error: job.error ?? undefined,
     created_at: job.created_at.toISOString(),
     started_at: job.started_at?.toISOString(),
@@ -99,6 +107,8 @@ function serializeJob(job: {
 @Injectable()
 export class CustomerExportService implements OnModuleInit {
   private readonly active = new Set<string>();
+  private readonly queue: string[] = [];
+  private draining = false;
 
   constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {}
 
@@ -106,7 +116,14 @@ export class CustomerExportService implements OnModuleInit {
     const interrupted = await this.prisma.exportJob.findMany({
       where: { status: { in: ['PENDING', 'RUNNING'] } },
       select: { job_id: true },
+      orderBy: { created_at: 'asc' },
     });
+    if (interrupted.length > 0) {
+      await this.prisma.exportJob.updateMany({
+        where: { job_id: { in: interrupted.map((job) => job.job_id) } },
+        data: { status: 'PENDING', started_at: null },
+      });
+    }
     for (const job of interrupted) this.schedule(job.job_id);
   }
 
@@ -128,6 +145,14 @@ export class CustomerExportService implements OnModuleInit {
     return job ? serializeJob(job) : null;
   }
 
+  async list(limit = 100): Promise<ExportJob[]> {
+    const jobs = await this.prisma.exportJob.findMany({
+      orderBy: { created_at: 'desc' },
+      take: Math.min(Math.max(limit, 1), 200),
+    });
+    return jobs.map(serializeJob);
+  }
+
   async getDownload(jobId: string): Promise<{ path: string; filename: string } | null> {
     const job = await this.prisma.exportJob.findUnique({ where: { job_id: jobId } });
     if (!job || job.status !== 'SUCCESS' || !job.file_path || !job.file_name) return null;
@@ -136,11 +161,31 @@ export class CustomerExportService implements OnModuleInit {
   }
 
   private schedule(jobId: string): void {
-    if (this.active.has(jobId)) return;
-    this.active.add(jobId);
+    if (this.active.has(jobId) || this.queue.includes(jobId)) return;
+    this.queue.push(jobId);
     setImmediate(() => {
-      void this.run(jobId).finally(() => this.active.delete(jobId));
+      void this.drain().catch(() => undefined);
     });
+  }
+
+  private async drain(): Promise<void> {
+    if (this.draining) return;
+    this.draining = true;
+    try {
+      for (;;) {
+        const jobId = this.queue.shift();
+        if (!jobId) break;
+        this.active.add(jobId);
+        try {
+          await this.run(jobId);
+        } finally {
+          this.active.delete(jobId);
+        }
+      }
+    } finally {
+      this.draining = false;
+      if (this.queue.length > 0) setImmediate(() => { void this.drain().catch(() => undefined); });
+    }
   }
 
   private async run(jobId: string): Promise<void> {
@@ -158,7 +203,10 @@ export class CustomerExportService implements OnModuleInit {
     await mkdir(workDir, { recursive: true });
     await this.prisma.exportJob.update({
       where: { job_id: jobId },
-      data: { status: 'RUNNING', started_at: new Date(), error: null },
+      data: {
+        status: 'RUNNING', started_at: new Date(), finished_at: null, error: null,
+        total_rows: 0, processed_rows: 0, groups: 0, completed_groups: 0,
+      },
     });
 
     try {
@@ -174,6 +222,11 @@ export class CustomerExportService implements OnModuleInit {
         }),
       ]);
       const plans = buildExportFilePlans(residentGroups, nonResidentCount);
+      const totalRows = plans.reduce((sum, plan) => sum + plan.count, 0);
+      await this.prisma.exportJob.update({
+        where: { job_id: jobId },
+        data: { total_rows: totalRows, groups: plans.length },
+      });
       const output = createWriteStream(zipPath, { flags: 'w', mode: 0o600 });
       const archive = archiver('zip', { zlib: { level: 6 } });
       const archiveDone = new Promise<void>((resolve, reject) => {
@@ -183,16 +236,25 @@ export class CustomerExportService implements OnModuleInit {
       });
       archive.pipe(output);
 
-      let totalRows = 0;
+      let processedRows = 0;
       for (let index = 0; index < plans.length; index += 1) {
         const plan = plans[index];
-        totalRows += plan.count;
         const xlsxPath = join(workDir, `${String(index).padStart(5, '0')}.xlsx`);
         const fileWhere: Prisma.CustomerWhereInput = plan.kind === 'resident_city'
           ? { AND: [where, { id_type: 'resident_id' }, { province: plan.province }, { city: plan.city }] }
           : { AND: [where, { id_type: { not: 'resident_id' } }] };
-        await this.writeWorkbook(xlsxPath, fileWhere);
+        await this.writeWorkbook(xlsxPath, fileWhere, async (fileRows) => {
+          await this.prisma.exportJob.update({
+            where: { job_id: jobId },
+            data: { processed_rows: processedRows + fileRows },
+          });
+        });
         archive.file(xlsxPath, { name: plan.archiveName });
+        processedRows += plan.count;
+        await this.prisma.exportJob.update({
+          where: { job_id: jobId },
+          data: { processed_rows: processedRows, completed_groups: index + 1 },
+        });
       }
 
       await archive.finalize();
@@ -205,7 +267,9 @@ export class CustomerExportService implements OnModuleInit {
           file_path: zipPath,
           file_name: filename,
           total_rows: totalRows,
+          processed_rows: totalRows,
           groups: plans.length,
+          completed_groups: plans.length,
           finished_at: new Date(),
           expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000),
         },
@@ -227,6 +291,7 @@ export class CustomerExportService implements OnModuleInit {
   private async writeWorkbook(
     path: string,
     where: Prisma.CustomerWhereInput,
+    onProgress?: (writtenRows: number) => Promise<void>,
   ): Promise<void> {
     const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
       filename: path,
@@ -240,6 +305,8 @@ export class CustomerExportService implements OnModuleInit {
       width: column.width,
     }));
     let cursor: string | undefined;
+    let writtenRows = 0;
+    let reportedRows = 0;
 
     for (;;) {
       const rows = await this.prisma.customer.findMany({
@@ -273,10 +340,16 @@ export class CustomerExportService implements OnModuleInit {
           ingest_batch: customer.ingest_batch ?? '',
         }).commit();
       }
+      writtenRows += rows.length;
+      if (onProgress && writtenRows - reportedRows >= 10_000) {
+        await onProgress(writtenRows);
+        reportedRows = writtenRows;
+      }
       cursor = rows.at(-1)?.customer_id;
     }
 
     await sheet.commit();
     await workbook.commit();
+    if (onProgress && writtenRows !== reportedRows) await onProgress(writtenRows);
   }
 }

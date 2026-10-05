@@ -74,6 +74,15 @@ html, body, #root {
   color: #777;
 }
 
+.export-task-summary {
+  color: #666;
+  font-size: 13px;
+}
+
+.export-task-error {
+  color: #cf1322;
+}
+
 .customer-table-area .ant-table-thead > tr > th:not(.ant-table-cell-fix-right):not(.ant-table-cell-fix-left) {
   position: relative;
 }

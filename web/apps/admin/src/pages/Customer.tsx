@@ -2,6 +2,7 @@ import { useLayoutEffect, useRef, useState } from 'react';
 import { Alert, App, Button, DatePicker, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Table, Tag } from 'antd';
 import dayjs from 'dayjs';
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useNavigate } from 'react-router-dom';
 import type { Customer, CustomerListQuery } from '@leadops/types';
 import { PageContainer } from '@leadops/ui';
 import { api } from '../api';
@@ -43,6 +44,7 @@ export default function CustomerPage() {
   const [exporting, setExporting] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const qc = useQueryClient();
+  const navigate = useNavigate();
   const { message, notification } = App.useApp();
 
   const { data, isFetching, error, refetch } = useQuery({
@@ -102,34 +104,9 @@ export default function CustomerPage() {
     setExporting(true);
     try {
       const { q, address, province, city, district, gender, id_type } = query;
-      let job = await api.customer.startExport({ q, address, province, city, district, gender, id_type });
-      message.info(`导出任务已创建：${job.job_id}`);
-      const deadline = Date.now() + 15 * 60 * 1000;
-      while (job.status === 'PENDING' || job.status === 'RUNNING') {
-        if (Date.now() >= deadline) throw new Error('导出仍在后台运行，请稍后重试');
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-        job = await api.customer.exportStatus(job.job_id);
-      }
-      if (job.status === 'FAILED') throw new Error(job.error ?? 'export_failed');
-      if (job.total_rows === 0) {
-        message.warning('当前筛选条件下没有数据可导出');
-        return;
-      }
-      const result = await api.customer.downloadExport(job);
-      const url = URL.createObjectURL(result.blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = result.filename;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-      notification.success({
-        message: '导出成功',
-        description: `共 ${job.total_rows} 条，生成 ${job.groups} 个 Excel：居民身份证按城市拆分，其他证件合并为一个文件，已打包成 ZIP 下载`,
-        placement: 'topRight',
-        duration: 6,
-      });
+      const job = await api.customer.startExport({ q, address, province, city, district, gender, id_type });
+      message.success(`导出任务已创建：${job.job_id}`);
+      navigate('/export-jobs');
     } catch (e) {
       notification.error({ message: '导出失败', description: (e as Error).message, placement: 'topRight' });
     } finally {

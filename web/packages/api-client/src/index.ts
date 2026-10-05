@@ -111,6 +111,8 @@ export class LeadOpsClient {
     removeAll: () => this.unwrap<{ deleted: number }>(this.http.delete('customer/_all')),
     startExport: (q: CustomerListQuery = {}) =>
       this.unwrap<ExportJob>(this.http.post('customer/exports', { json: q })),
+    exportJobs: (limit = 100) =>
+      this.unwrap<ExportJob[]>(this.http.get('customer/exports', { searchParams: { limit } })),
     exportStatus: (jobId: string) =>
       this.unwrap<ExportJob>(this.http.get(`customer/exports/${jobId}`)),
     downloadExport: async (job: ExportJob): Promise<{ blob: Blob; filename: string }> => {

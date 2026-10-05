@@ -1,8 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { normalizeIdCardForStorage } from '@leadops/ingest-service';
 import { PgSink } from '@leadops/ingest-service';
 import { CustomerController } from '../src/modules/customer.controller';
-import type { CustomerExportService } from '../src/modules/customer-export.service';
+import { CustomerExportService } from '../src/modules/customer-export.service';
 import { CustomerService } from '../src/modules/customer.service';
 import { PrismaService } from '../src/prisma/prisma.service';
 
@@ -357,5 +360,42 @@ describe.sequential('CustomerService PostgreSQL integration', () => {
     expect(create).toHaveBeenCalledWith(expect.objectContaining({ id_type: 'hongkong_id', q: '客户' }), 'unknown');
     expect(create.mock.calls[0][0]).not.toHaveProperty('page');
     expect(create.mock.calls[0][0]).not.toHaveProperty('limit');
+  });
+
+  it('persists export planning, file progress and completed jobs for task management', async () => {
+    const batch = `${runId}-export-progress`;
+    await service.upsertBatch([
+      { name: `${batch}-甲`, id_card: idCard('110'), id_type: 'resident_id', province: '测试省', city: '导出甲市', ingest_batch: batch },
+      { name: `${batch}-乙`, id_card: idCard('111'), id_type: 'resident_id', province: '测试省', city: '导出乙市', ingest_batch: batch },
+      { name: `${batch}-护照`, id_card: 'G23456789', id_type: 'passport_cn', ingest_batch: batch },
+    ]);
+    const dataDir = join(tmpdir(), `${runId}-exports`);
+    const previousDataDir = process.env.DATA_DIR;
+    process.env.DATA_DIR = dataDir;
+    const exports = new CustomerExportService(prisma);
+    let jobId: string | undefined;
+    try {
+      jobId = (await exports.create({ q: batch }, 'integration-test')).job_id;
+      await vi.waitFor(async () => {
+        expect((await exports.get(jobId as string))?.status).toBe('SUCCESS');
+      }, { timeout: 15_000, interval: 50 });
+      expect(await exports.get(jobId)).toMatchObject({
+        status: 'SUCCESS',
+        total_rows: 3,
+        processed_rows: 3,
+        groups: 3,
+        completed_groups: 3,
+        requested_by: 'integration-test',
+        filters: { q: batch },
+      });
+      expect(await exports.list()).toEqual(expect.arrayContaining([
+        expect.objectContaining({ job_id: jobId, status: 'SUCCESS' }),
+      ]));
+    } finally {
+      if (jobId) await prisma.exportJob.deleteMany({ where: { job_id: jobId } });
+      await rm(dataDir, { recursive: true, force: true });
+      if (previousDataDir === undefined) delete process.env.DATA_DIR;
+      else process.env.DATA_DIR = previousDataDir;
+    }
   });
 });
