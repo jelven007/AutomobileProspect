@@ -1,0 +1,14 @@
+{
+  "dataset_version": "MCA_2025-12-31",
+  "effective_date": "2025-12-31",
+  "fetched_at": "2026-10-05T12:51:45.496Z",
+  "source_page": "https://dmfw.mca.gov.cn/XzqhVersionPublish.html",
+  "source_url": "https://dmfw.mca.gov.cn/9095/xzqh/getList?code=&maxLevel=3",
+  "source_table": "Xzqh20251231",
+  "source_hash": "2502d54580c71cd8e4454ebdb3320277484776709eb945a729f97d95aadb9769",
+  "counts": {
+    "province": 34,
+    "prefecture": 333,
+    "county": 2847
+  }
+}

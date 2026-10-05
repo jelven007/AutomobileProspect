@@ -12,6 +12,10 @@
  */
 import { readFileSync } from 'fs';
 import { join } from 'path';
+import {
+  standardizeAdministrativeRegion,
+  type StandardizedAdministrativeRegion,
+} from './administrative-division';
 // 权威全国码表：31 省 + 400+ 地级 + 3200+ 县区
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const chinaProvinces: Array<{ code: string; name: string }> = require('china-division/dist/provinces.json');
@@ -138,6 +142,7 @@ export interface IdCardInfo {
   normalized_id_card?: string;
   gender?: 'M' | 'F' | 'U';
   checksum_valid?: boolean;
+  region?: StandardizedAdministrativeRegion;
 }
 
 export interface NormalizedIdCard {
@@ -293,6 +298,7 @@ export function parseIdCard(value: unknown): IdCardInfo {
     birth_date_corrected: normalized.birthDateCorrected,
     original_birth_date: normalized.originalBirthDate,
     normalized_id_card: s,
+    region: standardizeAdministrativeRegion('resident_id', s),
   };
   const provCode = s.slice(0, 2);
   const cityCode = s.slice(0, 4);

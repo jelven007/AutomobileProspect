@@ -142,6 +142,140 @@ model AuditLog {
   @@map("audit_log")
 }
 
+model AdministrativeDivisionDataset {
+  dataset_version  String   @id @db.VarChar(32)
+  effective_date   DateTime @db.Date
+  fetched_at       DateTime @db.Timestamptz(6)
+  source_page      String
+  source_url       String
+  source_table     String   @db.VarChar(64)
+  source_hash      String   @db.Char(64)
+  province_count   Int
+  prefecture_count Int
+  county_count     Int
+  imported_at      DateTime @default(now()) @db.Timestamptz(6)
+
+  @@map("administrative_division_dataset")
+}
+
+model AdministrativeDivision {
+  dataset_version    String    @db.VarChar(32)
+  source_code        String    @db.VarChar(12)
+  code               String?   @db.Char(6)
+  name               String    @db.VarChar(64)
+  level              String    @db.VarChar(16)
+  division_type      String    @db.VarChar(32)
+  parent_source_code String?   @db.VarChar(12)
+  parent_code        String?   @db.Char(6)
+  effective_from     DateTime? @db.Date
+  effective_to       DateTime? @db.Date
+  is_current         Boolean   @default(true)
+  source_url         String
+  source_hash        String    @db.Char(64)
+
+  @@id([dataset_version, source_code])
+  @@unique([dataset_version, code])
+  @@index([dataset_version, parent_source_code], map: "idx_administrative_division_parent")
+  @@index([dataset_version, name, level], map: "idx_administrative_division_name")
+  @@map("administrative_division")
+}
+
+model AdministrativeDivisionCrosswalk {
+  crosswalk_id           BigInt   @id @default(autoincrement())
+  rule_version           String   @db.VarChar(32)
+  target_dataset_version String   @db.VarChar(32)
+  source_code            String   @db.Char(6)
+  source_name            String?  @db.VarChar(64)
+  source_level           String   @db.VarChar(16)
+  source_type            String?  @db.VarChar(32)
+  target_code            String?  @db.Char(6)
+  mapping_kind           String   @db.VarChar(32)
+  mapping_scope          String   @db.VarChar(16)
+  auto_apply             Boolean  @default(false)
+  confidence             Int      @db.SmallInt
+  evidence               String
+  created_at             DateTime @default(now()) @db.Timestamptz(6)
+
+  @@map("administrative_division_crosswalk")
+}
+
+model RegionStandardizationBatch {
+  region_batch_id     String    @id @db.Char(26)
+  dataset_version     String    @db.VarChar(32)
+  rule_version        String    @db.VarChar(32)
+  source_hash         String    @db.Char(64)
+  status              String    @default("PENDING") @db.VarChar(16)
+  selection           Json      @default("{}")
+  total_rows          BigInt    @default(0)
+  processed_rows      BigInt    @default(0)
+  current_rows        BigInt    @default(0)
+  historical_rows     BigInt    @default(0)
+  partial_rows        BigInt    @default(0)
+  ambiguous_rows      BigInt    @default(0)
+  unresolved_rows     BigInt    @default(0)
+  not_applicable_rows BigInt    @default(0)
+  changed_rows        BigInt    @default(0)
+  worker_id           String?   @db.VarChar(128)
+  lease_until         DateTime? @db.Timestamptz(6)
+  last_customer_id    String?   @db.Char(26)
+  last_ingest_month   DateTime? @db.Date
+  started_at          DateTime? @db.Timestamptz(6)
+  finished_at         DateTime? @db.Timestamptz(6)
+  error               String?
+  requested_by        String?   @db.VarChar(128)
+  created_at          DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at          DateTime  @default(now()) @db.Timestamptz(6)
+
+  @@index([status, created_at], map: "idx_region_standardization_batch_status")
+  @@map("region_standardization_batch")
+}
+
+model RegionStandardizationStaging {
+  region_batch_id         String   @db.Char(26)
+  customer_id             String   @db.Char(26)
+  ingest_month            DateTime @db.Date
+  expected_old_hash       String   @db.Char(64)
+  result_hash             String   @db.Char(64)
+  origin_region_code      String?  @db.Char(6)
+  current_province_code   String?  @db.Char(6)
+  current_province_name   String?  @db.VarChar(64)
+  current_prefecture_code String?  @db.Char(6)
+  current_prefecture_name String?  @db.VarChar(64)
+  current_county_code     String?  @db.Char(6)
+  current_county_name     String?  @db.VarChar(64)
+  current_division_type   String?  @db.VarChar(32)
+  region_group_code       String?  @db.Char(6)
+  region_group_name       String?  @db.VarChar(64)
+  region_group_type       String?  @db.VarChar(32)
+  region_source           String   @db.VarChar(32)
+  mapping_status          String   @db.VarChar(32)
+  mapping_method          String   @db.VarChar(32)
+  confidence              Int      @db.SmallInt
+  error                   String?
+  created_at              DateTime @default(now()) @db.Timestamptz(6)
+
+  @@id([region_batch_id, customer_id, ingest_month])
+  @@index([region_batch_id, mapping_status], map: "idx_region_staging_status")
+  @@map("region_standardization_staging")
+}
+
+model RegionStandardizationChange {
+  change_id       BigInt    @id @default(autoincrement())
+  region_batch_id String    @db.Char(26)
+  customer_id     String    @db.Char(26)
+  ingest_month    DateTime  @db.Date
+  old_value_hash  String    @db.Char(64)
+  new_value_hash  String    @db.Char(64)
+  old_values      Json
+  new_values      Json
+  mapping_status  String    @db.VarChar(32)
+  changed_at      DateTime  @default(now()) @db.Timestamptz(6)
+  rolled_back_at  DateTime? @db.Timestamptz(6)
+
+  @@unique([region_batch_id, customer_id, ingest_month], map: "uk_region_standardization_change_customer")
+  @@map("region_standardization_change")
+}
+
 // ingest_row_log 没有主键，BFF 一期暂不读写它，这里 @@ignore
 // 让 Prisma 承认表存在但不生成 CRUD。
 model IngestRowLog {
