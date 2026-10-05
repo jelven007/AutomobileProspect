@@ -3,6 +3,17 @@
 
 BEGIN;
 
+-- Never reapply the legacy dedupe after multi-document identities have been enabled.
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+     WHERE table_schema = current_schema() AND table_name = 'customer' AND column_name = 'id_type'
+  ) THEN
+    RAISE EXCEPTION 'document_identity_already_enabled: apply incremental migrations only';
+  END IF;
+END $$;
+
 SELECT pg_advisory_xact_lock(hashtextextended('customer:id-card-identity-migration', 0));
 
 UPDATE customer

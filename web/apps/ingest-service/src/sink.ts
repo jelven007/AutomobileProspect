@@ -1,6 +1,7 @@
 import { Pool } from 'pg';
 import { ulid } from 'ulid';
 import type { CustomerRow } from './types';
+import { documentKey, normalizeDocument } from './document';
 
 export interface SinkStats {
   inserted: number;
@@ -23,6 +24,7 @@ CREATE TEMP TABLE ingest_stage (
   name VARCHAR(64) NOT NULL,
   gender CHAR(1),
   birth_date DATE,
+  id_type VARCHAR(32) NOT NULL,
   id_card VARCHAR(32) NOT NULL,
   phone_masked VARCHAR(64),
   address VARCHAR(256),
@@ -49,6 +51,7 @@ SELECT *
     name VARCHAR(64),
     gender CHAR(1),
     birth_date DATE,
+    id_type VARCHAR(32),
     id_card VARCHAR(32),
     phone_masked VARCHAR(64),
     address VARCHAR(256),
@@ -87,7 +90,7 @@ UPDATE customer AS c
        version = c.version + 1,
        updated_at = NOW()
   FROM ingest_stage AS s
-  JOIN customer_identity AS ci ON ci.id_card = s.id_card
+  JOIN customer_identity AS ci ON ci.id_type = s.id_type AND ci.id_card = s.id_card
  WHERE c.customer_id = ci.customer_id
    AND c.ingest_month = ci.ingest_month
    AND c.is_deleted = FALSE
@@ -95,16 +98,16 @@ UPDATE customer AS c
 
 const INSERT_NEW_SQL = `
 INSERT INTO customer (
-  customer_id, huji_no, name, gender, birth_date, id_card, phone_masked,
+  customer_id, huji_no, name, gender, birth_date, id_type, id_card, phone_masked,
   address, stat_time, province, city, district, occupation, education,
   marital_status, source_file, source_row, ingest_batch, ingest_month
 )
-SELECT s.customer_id, s.huji_no, s.name, s.gender, s.birth_date, s.id_card,
+SELECT s.customer_id, s.huji_no, s.name, s.gender, s.birth_date, s.id_type, s.id_card,
        s.phone_masked, s.address, s.stat_time, s.province, s.city, s.district,
        s.occupation, s.education, s.marital_status, s.source_file, s.source_row,
        s.ingest_batch, s.ingest_month
   FROM ingest_stage AS s
-  LEFT JOIN customer_identity AS ci ON ci.id_card = s.id_card
+  LEFT JOIN customer_identity AS ci ON ci.id_type = s.id_type AND ci.id_card = s.id_card
  WHERE ci.id_card IS NULL
 `;
 
@@ -124,7 +127,9 @@ export class PgSink {
   }
 
   async push(row: CustomerRow): Promise<void> {
-    this.buf.push(row);
+    const document = normalizeDocument(row.id_card, row.id_type);
+    if (document.error) throw new Error(document.error);
+    this.buf.push({ ...row, id_type: document.type, id_card: document.value });
     if (this.buf.length >= this.batchSize) await this.flush();
   }
 
@@ -133,10 +138,9 @@ export class PgSink {
     const pending = this.buf.slice();
     const byIdCard = new Map<string, CustomerRow>();
     for (const row of pending) {
-      const idCard = row.id_card?.trim().toUpperCase();
-      if (!idCard) throw new Error('id_card_required');
-      if (byIdCard.has(idCard)) this.stats.duplicateRows += 1;
-      byIdCard.set(idCard, { ...row, id_card: idCard });
+      const key = documentKey(row);
+      if (byIdCard.has(key)) this.stats.duplicateRows += 1;
+      byIdCard.set(key, row);
     }
     const ingestMonth = new Date().toISOString().slice(0, 7) + '-01';
     const rows: StagedRow[] = [...byIdCard.values()].map((row) => ({
@@ -146,7 +150,7 @@ export class PgSink {
       ingest_month: ingestMonth,
     }));
     const lockKeys = [...new Set(rows.flatMap((row) => {
-      const keys = [`id-card:${row.id_card}`];
+      const keys = [`document:${documentKey(row)}`];
       if (row.ingest_batch && row.source_file && row.source_row != null) {
         keys.push(`source:${JSON.stringify([row.ingest_batch, row.source_file, row.source_row])}`);
       }
@@ -179,12 +183,12 @@ export class PgSink {
       const updated = await client.query(UPDATE_EXISTING_SQL);
       const inserted = await client.query(INSERT_NEW_SQL);
       await client.query(`
-        INSERT INTO customer_identity (id_card, customer_id, ingest_month)
-        SELECT s.id_card, s.customer_id, s.ingest_month
+        INSERT INTO customer_identity (id_type, id_card, customer_id, ingest_month)
+        SELECT s.id_type, s.id_card, s.customer_id, s.ingest_month
           FROM ingest_stage AS s
-          LEFT JOIN customer_identity AS ci ON ci.id_card = s.id_card
+          LEFT JOIN customer_identity AS ci ON ci.id_type = s.id_type AND ci.id_card = s.id_card
          WHERE ci.id_card IS NULL
-        ON CONFLICT (id_card) DO NOTHING
+        ON CONFLICT (id_type, id_card) DO NOTHING
       `);
       await client.query(`
         INSERT INTO ingest_row_identity (
@@ -196,7 +200,7 @@ export class PgSink {
                COALESCE(ci.customer_id, s.customer_id),
                COALESCE(ci.ingest_month, s.ingest_month)
           FROM ingest_stage AS s
-          LEFT JOIN customer_identity AS ci ON ci.id_card = s.id_card
+          LEFT JOIN customer_identity AS ci ON ci.id_type = s.id_type AND ci.id_card = s.id_card
          WHERE s.ingest_batch IS NOT NULL
            AND s.source_file IS NOT NULL
            AND s.source_row IS NOT NULL

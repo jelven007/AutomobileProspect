@@ -8,7 +8,7 @@ import {
   maskIdCard,
 } from '../src/transforms';
 import { cleanRow, cleanRowDetailed, CleaningError, RowDeduper, buildDynamicMappings } from '../src/pipeline';
-import { normalizeIdCardForStorage, parseIdCard } from '../src/id-card';
+import { isValidIdCardIdentity, normalizeIdCardForStorage, parseIdCard } from '../src/id-card';
 import type { IngestSchema } from '../src/types';
 
 describe('stripPrefixDigits', () => {
@@ -71,7 +71,7 @@ const schema: IngestSchema = {
     drop_indexes: [1, 3, -1, -2],
     mappings: [
       { index: 2, field: 'stat_time', transform: 'parse_datetime' },
-      { index: 4, field: 'huji_no', required: true, transform: 'strip_prefix_digits', transform_args: ['2016户籍统计'] },
+      { index: 4, field: 'huji_no', transform: 'strip_prefix_digits', transform_args: ['2016户籍统计'] },
       { index: 5, field: 'birth_date', transform: 'parse_date' },
       { index: 6, field: 'gender', transform: 'map_gender' },
       { index: 7, field: 'id_card', transform: 'mask_id_card' },
@@ -85,6 +85,59 @@ const schema: IngestSchema = {
 };
 
 const ctx = { source_file: 'Demo.xlsx', source_row: 2, ingest_batch: 'b1' };
+
+describe('identity admission before deduplication', () => {
+  const identitySchema: IngestSchema = {
+    ...schema,
+    columns: {
+      drop_indexes: [],
+      mappings: [{ index: 1, field: 'name', required: true }, { index: 2, field: 'id_card' }],
+    },
+  };
+
+  it.each([
+    '未知', '无', 'NULL', '-', '12345', '111111111111111', '0'.repeat(18),
+    '51022319741013721A', '5.10223197410137219E+17', '510223000001017219',
+    '000000197410137219', '未知未知未知未知未知未知未知未知未知',
+  ])('rejects invalid identity %s without deriving identity attributes', (value) => {
+    expect(() => cleanRow(['客户甲', value], identitySchema, ctx)).toThrow(
+      value === '-' ? 'required_missing:id_card' : 'invalid_id_card_format',
+    );
+    expect(parseIdCard(value)).toEqual({});
+    expect(isValidIdCardIdentity(normalizeIdCardForStorage(value).value)).toBe(false);
+  });
+
+  it('never merges two different names sharing the same placeholder', () => {
+    const deduper = new RowDeduper(identitySchema.dedupe);
+    const rejected: string[] = [];
+    for (const name of ['客户甲', '客户乙']) {
+      try {
+        deduper.add(cleanRow([name, '未知'], identitySchema, ctx));
+      } catch (error) {
+        expect(error).toBeInstanceOf(CleaningError);
+        rejected.push((error as CleaningError).reason);
+      }
+    }
+    expect(rejected).toEqual(['invalid_id_card_format', 'invalid_id_card_format']);
+    expect(deduper.size()).toBe(0);
+  });
+
+  it.each([
+    '510223741013721', '51022319741013721', '510223197410137219',
+    '５１０２２３１９７４１０１３７２１９', ' 510223 19741013 7219 ',
+  ])('normalizes compatible identity %s to the same key', (value) => {
+    expect(cleanRow(['客户', value], identitySchema, ctx).id_card).toBe('510223197410137219');
+  });
+
+  it('accepts lowercase x, historical/unknown districts and bad checksums with warnings', () => {
+    expect(cleanRow(['客户', '11010519491231002x'], identitySchema, ctx).id_card).toBe('11010519491231002X');
+    const { row, warnings } = cleanRowDetailed(['客户', '999999197410137219'], identitySchema, ctx);
+    expect(row.id_card).toBe('999999197410137219');
+    expect(warnings).toContain('id_card_province_unknown');
+    expect(cleanRowDetailed(['客户', '510223197410137210'], identitySchema, ctx).warnings)
+      .toContain('id_card_checksum_invalid');
+  });
+});
 
 describe('cleanRow (真实 Demo.xlsx 结构)', () => {
   it('drops 1/3/-1/-2 and maps 真实样例', () => {
@@ -106,9 +159,29 @@ describe('cleanRow (真实 Demo.xlsx 结构)', () => {
     expect(out.district).toBe('綦江县');
   });
 
-  it('throws when huji_no not pure digits after strip', () => {
-    const row = ['派出所', 't', '地址', '2016户籍统计', '', '男', 'x', '张三', '1', 'a', 'x', 'y'];
-    expect(() => cleanRow(row, schema, ctx)).toThrow(CleaningError);
+  it.each(['ABC-123', '未知', ''])('accepts nonnumeric or empty huji_no %s without a digit transform', (hujiNo) => {
+    const noTransformSchema: IngestSchema = {
+      ...schema,
+      columns: {
+        ...schema.columns,
+        mappings: schema.columns.mappings.map((column) => column.field === 'huji_no'
+          ? { ...column, transform: undefined, transform_args: undefined }
+          : column),
+      },
+    };
+    const row = ['派出所', '2016/02/26', '地址', hujiNo, '', '男',
+      '510223197410137219', '张三', '1', 'a', 'x', 'y'];
+    expect(cleanRow(row, noTransformSchema, ctx)).toMatchObject({
+      name: '张三', id_card: '510223197410137219', huji_no: hujiNo || undefined,
+    });
+  });
+
+  it.each([['ABC-123', '123'], ['未知', ''], ['', '']])('retains configured code cleaning for %s', (raw, expected) => {
+    const row = ['派出所', '2016/02/26', '地址', raw, '', '男',
+      '510223197410137219', '张三', '1', 'a', 'x', 'y'];
+    expect(cleanRow(row, schema, ctx)).toMatchObject({
+      name: '张三', id_card: '510223197410137219', huji_no: expected,
+    });
   });
 
   it('throws when name missing', () => {

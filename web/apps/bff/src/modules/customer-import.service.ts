@@ -20,6 +20,7 @@ import {
   buildDynamicMappings,
   cleanRowDetailed,
   CleaningError,
+  documentKey,
   streamXlsx,
   type IngestSchema,
 } from '@leadops/ingest-service';
@@ -27,7 +28,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { CustomerService, type IngestRow } from './customer.service';
 
 const BATCH_SIZE = 1000;
-const IMPORT_PIPELINE_VERSION = 2;
+const IMPORT_PIPELINE_VERSION = 6;
 
 function loadSchema(): IngestSchema {
   const path = process.env.INGEST_SCHEMA_PATH
@@ -289,8 +290,9 @@ export class CustomerImportService implements OnModuleInit {
       for (const row of buffer) {
         const idCard = row.id_card?.trim().toUpperCase();
         if (!idCard) throw new Error('id_card_required_after_cleaning');
-        if (byIdCard.has(idCard)) report.duplicate_rows += 1;
-        byIdCard.set(idCard, { ...row, id_card: idCard });
+        const key = documentKey(row);
+        if (byIdCard.has(key)) report.duplicate_rows += 1;
+        byIdCard.set(key, { ...row, id_card: idCard });
       }
       const batch = [...byIdCard.values()];
       const result = await this.customers.upsertBatch(batch, {

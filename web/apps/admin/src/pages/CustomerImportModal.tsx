@@ -156,17 +156,20 @@ export function CustomerImportModal({
         type="info"
         showIcon
         style={{ marginBottom: 12 }}
-        message="清洗 + 去重 + 身份证派生规则（固化在服务端）"
+        message="证件识别、清洗与去重规则"
         description={
           <Paragraph style={{ marginBottom: 0 }}>
             <ul style={{ margin: 0, paddingLeft: 20 }}>
               <li><b>动态列识别</b>：基于 Excel 第 1 行表头名字自动匹配字段（支持手机号/移动电话/联系电话、地址/详细地址/现住址 等多种别名），列顺序不一致也能正确入库</li>
               <li>自动丢弃「所属户籍站」「编码1/2…」等噪声列；「居住地址」与「地址」同时出现时优先后者</li>
-              <li>编码编号仅作为普通展示字段，非必填，不参与唯一性判断</li>
-              <li>姓名和身份证为必填；缺失身份证或编码编号非数字的行会被跳过并留痕</li>
-              <li><b>跨批次去重</b>：仅按身份证匹配，命中则合并（空值不覆盖已有数据）；同一身份证始终只保留一条客户记录</li>
+              <li>编码编号仅作为普通展示字段，非必填，不参与唯一性判断；含非数字字符不会导致整行跳过</li>
+              <li>姓名和证件号码为必填；缺失或格式无效的行会被跳过，导入报告展示前 100 条异常行及原因</li>
+              <li>支持居民身份证、组织机构代码、统一社会信用代码、中国普通护照、港澳通行证和带括号校验位的香港身份证；台胞证和有歧义的号码需增加「证件类型」列。手机号、NULL、未知短号不会作为证件入库</li>
+              <li>香港身份证须通过校验位检查；同时符合多种格式但无法确定类型的号码，可明确标为「证件类型待核实」，保留号码并记录告警</li>
+              <li><b>跨批次去重</b>：按证件类型和号码共同匹配，命中则合并（空值不覆盖已有数据）；不同证件类型独立去重</li>
               <li><b>身份证派生</b>：前 2 位 → 省份；前 4 位 → 城市；前 6 位 → 区县；7–14 位 → 出生日期；第 17 位 → 性别（Excel 原列有值时不覆盖；支持 15 位老身份证自动补 18 位）</li>
               <li>身份证中的非法日期会向前修正到最近合法日期并重新计算校验位，例如 2 月 30 日修正为当月最后一天</li>
+              <li>有效居民身份证两侧的 # 会自动去除并记录告警；组织机构代码和统一社会信用代码须通过校验位检查，其他证件不推导性别、出生日期或地区</li>
               <li>身份证、手机号均以<b>明文</b>存储（一期不脱敏）</li>
             </ul>
           </Paragraph>
@@ -286,7 +289,7 @@ export function CustomerImportModal({
           <Paragraph>
             总行数 <Text strong>{report.total_rows}</Text>　
             清洗成功 <Text strong style={{ color: '#52c41a' }}>{report.success_rows}</Text>　
-            身份证去重 <Text strong style={{ color: '#1677ff' }}>{report.duplicate_rows ?? 0}</Text>　
+            证件去重 <Text strong style={{ color: '#1677ff' }}>{report.duplicate_rows ?? 0}</Text>　
             新增入库 <Text strong style={{ color: '#52c41a' }}>{report.inserted_rows ?? 0}</Text>　
             合并到已有 <Text strong style={{ color: '#1677ff' }}>{report.updated_rows ?? 0}</Text>　
             实际写入 <Text strong style={{ color: '#13c2c2' }}>{report.written_rows ?? report.success_rows}</Text>　
@@ -296,7 +299,7 @@ export function CustomerImportModal({
             const hitFields = new Set(report.detected_mapping.map((m) => m.field));
             const KEY_FIELDS: Array<{ key: string; label: string }> = [
               { key: 'name', label: '姓名' },
-              { key: 'id_card', label: '身份证' },
+              { key: 'id_card', label: '证件号码' },
               { key: 'phone_masked', label: '手机号' },
               { key: 'address', label: '地址' },
               { key: 'birth_date', label: '出生日期' },
@@ -367,6 +370,9 @@ export function CustomerImportModal({
                       {k === 'id_card_province_unknown' && <>（身份证前 2 位未匹配到省份）</>}
                       {k === 'id_card_birth_date_corrected' && <>（身份证中的非法日期已向前修正，并重新计算校验位）</>}
                       {k === 'id_card_checksum_invalid' && <>（身份证校验位失败，仍已入库）</>}
+                      {k === 'id_card_hash_wrapper_removed' && <>（有效身份证两侧的 # 已去除）</>}
+                      {k === 'document_issue_suffix_removed' && <>（回乡证换证次数后缀已移除，使用终身证件号码匹配）</>}
+                      {k === 'document_type_pending_verification' && <>（号码存在类型歧义，已按「证件类型待核实」保存，请核实后修改类型）</>}
                     </li>
                   ))}
                 </ul>

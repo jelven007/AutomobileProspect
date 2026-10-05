@@ -90,6 +90,8 @@ export interface Customer {
   name: string;
   gender?: 'M' | 'F' | 'U';
   birth_date?: string;
+  /** 证件类型；省略时由写入端识别，历史客户为 resident_id。 */
+  id_type?: string;
   id_card?: string;
   phone_masked?: string;
   address?: string;
@@ -116,6 +118,9 @@ export interface CustomerListQuery {
   city?: string;
   district?: string;
   gender?: 'M' | 'F' | 'U';
+  id_type?: string;
+  /** 1-based page number. Omit to use legacy cursor pagination. */
+  page?: number;
   cursor?: string;
   limit?: number;
 }
@@ -131,6 +136,8 @@ export interface CustomerListResult {
   next_cursor?: string;
   has_more: boolean;
   total: number;
+  page?: number;
+  total_pages: number;
 }
 
 export interface IngestJob {

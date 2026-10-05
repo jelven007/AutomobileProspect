@@ -226,6 +226,10 @@ export function expand15To18(s15: string): string | null {
 
 export function normalizeIdCardForStorage(raw: unknown): NormalizedIdCard {
   const sanitized = sanitizeIdCard(raw);
+  // 全重复数字是占位值，不能通过日期修复变成看似有效的身份键。
+  if (/^(\d)\1+$/.test(sanitized)) {
+    return { value: sanitized, birthDateCorrected: false };
+  }
   let body: string;
   let originalValue = sanitized;
   if (/^\d{15}$/.test(sanitized)) {
@@ -256,11 +260,25 @@ function validateIdCard(s: string): boolean {
   return checksumForBody(s.slice(0, 17)) === s[17];
 }
 
+/**
+ * 归一化后的身份键准入：格式、年份和真实日历日期必须有效。
+ * 不要求命中现行行政区划，也不把校验位告警升级为拒绝。
+ */
+export function isValidIdCardIdentity(value: string): boolean {
+  if (!/^[1-9]\d{5}(18|19|20)\d{2}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])\d{3}[\dX]$/.test(value)) {
+    return false;
+  }
+  const year = Number(value.slice(6, 10));
+  const month = Number(value.slice(10, 12));
+  const day = Number(value.slice(12, 14));
+  return day <= new Date(Date.UTC(year, month, 0)).getUTCDate();
+}
+
 export function parseIdCard(value: unknown): IdCardInfo {
   if (value == null) return {};
   const normalized = normalizeIdCardForStorage(value);
   const s = normalized.value;
-  if (s.length !== 18) return {};
+  if (!isValidIdCardIdentity(s)) return {};
 
   const table = loadTable();
   const history = loadHistoryTable();

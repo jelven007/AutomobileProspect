@@ -3,10 +3,14 @@ import { pipeline } from 'node:stream/promises';
 import { createWriteStream } from 'node:fs';
 import { mkdtemp, rm, stat, statfs } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import ExcelJS from 'exceljs';
+import { join, posix } from 'node:path';
 import { Open } from 'unzipper';
-import { SaxesParser } from 'saxes';
+import {
+  parseSharedStrings,
+  parseWorkbookRelationships,
+  parseWorkbookSheets,
+  parseWorksheet,
+} from './xlsx-xml';
 
 export interface ParsedRow {
   rowNo: number;
@@ -44,49 +48,20 @@ function envBytes(name: string, fallbackMb: number): number {
   return value * 1024 * 1024;
 }
 
-async function parseSharedStrings(stream: NodeJS.ReadableStream): Promise<string[]> {
-  const values: string[] = [];
-  let inString = false;
-  let inText = false;
-  let current = '';
-  const parser = new SaxesParser();
-  const localName = (name: string) => name.split(':').at(-1);
-
-  parser.on('opentag', (tag) => {
-    const name = localName(tag.name);
-    if (name === 'si') {
-      inString = true;
-      current = '';
-    } else if (inString && name === 't') {
-      inText = true;
-    }
-  });
-  parser.on('text', (text) => {
-    if (inString && inText) current += text;
-  });
-  parser.on('cdata', (text) => {
-    if (inString && inText) current += text;
-  });
-  parser.on('closetag', (tag) => {
-    const name = localName(tag.name);
-    if (name === 't') inText = false;
-    if (name === 'si') {
-      values.push(current);
-      inString = false;
-      current = '';
-    }
-  });
-
-  for await (const chunk of stream as AsyncIterable<Buffer | string>) {
-    parser.write(typeof chunk === 'string' ? chunk : chunk.toString('utf8'));
+async function readXml<T>(
+  entry: ZipEntryInfo,
+  parse: (stream: NodeJS.ReadableStream) => Promise<T>,
+): Promise<T> {
+  try {
+    return await parse(entry.stream());
+  } catch {
+    throw corruptedArchiveError(entry.path);
   }
-  parser.close();
-  return values;
 }
 
 /**
- * 使用 exceljs 的流式读取（WorkbookReader），避免整个工作簿加载到内存。
- * 对 1 GB 级 xlsx 文件内存控制在 ~400 MB 以内。
+ * 根据工作簿关系定位工作表，再以有状态 UTF-8 解码流式解析 XML。
+ * 不依赖 ZIP 条目顺序，也不将整个工作表加载到内存。
  */
 export async function* streamXlsx(
   input: Readable,
@@ -110,7 +85,7 @@ export async function* streamXlsx(
     const maxCompressedBytes = envBytes('MAX_UPLOAD_MB', 512);
     if (compressedBytes > maxCompressedBytes) throw new Error('xlsx_file_too_large');
 
-    let sharedStrings: unknown[] = [];
+    let sharedStrings: string[] = [];
     const zip = await Open.file(tempPath);
     const entries = zip.files as ZipEntryInfo[];
     const maxEntries = Number(process.env.XLSX_MAX_ENTRIES ?? 2000);
@@ -124,7 +99,33 @@ export async function* streamXlsx(
       throw new Error('xlsx_compression_ratio_exceeded');
     }
 
-    const sharedStringsEntry = entries.find((entry) => entry.path === 'xl/sharedStrings.xml');
+    const requiredEntry = (path: string): ZipEntryInfo => {
+      const entry = entries.find((item) => item.path === path);
+      if (!entry) throw new Error(`xlsx_entry_missing:${path}`);
+      return entry;
+    };
+    const sheetIds = await readXml(requiredEntry('xl/workbook.xml'), parseWorkbookSheets);
+    const relationships = await readXml(
+      requiredEntry('xl/_rels/workbook.xml.rels'),
+      parseWorkbookRelationships,
+    );
+    const targetPath = (target: string) => posix.normalize(
+      target.startsWith('/') ? target.slice(1) : posix.join('xl', target),
+    );
+    const worksheetRelation = relationships.find((relation) => (
+      relation.id === sheetIds[sheetIndex]
+      && relation.type.endsWith('/worksheet')
+      && !relation.external
+    ));
+    if (!worksheetRelation) throw new Error(`xlsx_worksheet_missing:${sheetIndex}`);
+    const worksheetEntry = requiredEntry(targetPath(worksheetRelation.target));
+
+    const sharedRelation = relationships.find((relation) => (
+      relation.type.endsWith('/sharedStrings') && !relation.external
+    ));
+    const sharedStringsEntry = sharedRelation
+      ? requiredEntry(targetPath(sharedRelation.target))
+      : entries.find((entry) => entry.path === 'xl/sharedStrings.xml');
     if (sharedStringsEntry) {
       const sharedStringsBytes = sharedStringsEntry.uncompressedSize
         ?? sharedStringsEntry.vars?.uncompressedSize
@@ -132,51 +133,25 @@ export async function* streamXlsx(
       if (sharedStringsBytes > envBytes('XLSX_MAX_SHARED_STRINGS_MB', 256)) {
         throw new Error('xlsx_shared_strings_size_exceeded');
       }
-      try {
-        sharedStrings = await parseSharedStrings(sharedStringsEntry.stream());
-      } catch {
-        throw corruptedArchiveError(sharedStringsEntry.path);
-      }
+      sharedStrings = await readXml(sharedStringsEntry, parseSharedStrings);
     }
-
-    const worksheetEntries = entries
-      .filter((entry) => /^xl\/worksheets\/sheet\d+\.xml$/i.test(entry.path))
-      .sort((left, right) => {
-        const leftIndex = Number(left.path.match(/sheet(\d+)\.xml$/i)?.[1] ?? 0);
-        const rightIndex = Number(right.path.match(/sheet(\d+)\.xml$/i)?.[1] ?? 0);
-        return leftIndex - rightIndex;
-      });
-    const worksheetEntry = worksheetEntries[sheetIndex];
-    if (!worksheetEntry) throw new Error(`xlsx_worksheet_missing:${sheetIndex}`);
 
     // Validate the complete deflate stream before yielding rows, so a damaged
     // worksheet cannot leave a partially committed import behind.
     await assertZipEntryReadable(worksheetEntry);
 
-    const workbookReader = new ExcelJS.stream.xlsx.WorkbookReader(tempPath, {
-      entries: 'ignore',
-      sharedStrings: 'cache',
-      styles: 'ignore',
-      hyperlinks: 'ignore',
-      worksheets: 'emit',
-    });
-    (workbookReader as unknown as { sharedStrings: unknown[] }).sharedStrings = sharedStrings;
-
-    let currentSheet = -1;
-    for await (const sheet of workbookReader as unknown as AsyncIterable<ExcelJS.stream.xlsx.WorksheetReader>) {
-      currentSheet += 1;
-      if (currentSheet !== sheetIndex) continue;
-
-      for await (const row of sheet as unknown as AsyncIterable<ExcelJS.Row>) {
-        if (row.number <= skip) continue;
-        const values = (row.values as unknown[]).slice(1); // exceljs 的 values[0] 为占位
-        if (values.every((value) => (
+    try {
+      for await (const row of parseWorksheet(worksheetEntry.stream(), sharedStrings)) {
+        if (row.rowNo <= skip) continue;
+        if (row.values.every((value) => (
           value == null || (typeof value === 'string' && value.trim() === '')
         ))) {
           continue;
         }
-        yield { rowNo: row.number, values };
+        yield row;
       }
+    } catch {
+      throw corruptedArchiveError(worksheetEntry.path);
     }
   } finally {
     await rm(tempDir, { recursive: true, force: true });

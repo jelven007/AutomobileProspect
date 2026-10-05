@@ -24,12 +24,13 @@ import type {
   IngestJob,
 } from '@leadops/types';
 import type { Prisma } from '@prisma/client';
-import { normalizeIdCardForStorage, parseIdCard } from '@leadops/ingest-service';
+import { documentKey, normalizeDocument, parseIdCard } from '@leadops/ingest-service';
 import { type AuthUser, Roles } from '../common/auth';
 import { PrismaService } from '../prisma/prisma.service';
 import { CustomerExportService } from './customer-export.service';
 import { CustomerImportService } from './customer-import.service';
 import { deriveIngestMonth, toCustomer } from './customer.service';
+import { customerWhere } from './customer-filters';
 
 interface CreateDto extends Partial<Omit<Customer, 'customer_id' | 'version' | 'is_deleted' | 'created_at' | 'updated_at'>> {
   name: string;
@@ -61,24 +62,15 @@ function jsonValue(value: unknown): Prisma.InputJsonValue {
   return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
 }
 
-function normalizeIdCard(value: unknown): string {
-  return normalizeIdCardForStorage(value).value;
-}
-
-function customerWhere(query: CustomerListQuery): Prisma.CustomerWhereInput {
-  const where: Prisma.CustomerWhereInput = { is_deleted: false };
-  if (query.q) {
-    where.OR = [
-      { name: { contains: query.q } },
-      { huji_no: { contains: query.q } },
-    ];
+function requireDocument(value: unknown, type?: unknown): { id_card: string; id_type: string } {
+  const document = normalizeDocument(value, type);
+  if (document.error) {
+    throw new HttpException(
+      { code: 40001, message: document.error },
+      HttpStatus.BAD_REQUEST,
+    );
   }
-  if (query.address) where.address = { contains: query.address };
-  if (query.province) where.province = { contains: query.province };
-  if (query.city) where.city = { contains: query.city };
-  if (query.district) where.district = { contains: query.district };
-  if (query.gender) where.gender = query.gender;
-  return where;
+  return { id_card: document.value, id_type: document.type as string };
 }
 
 @Controller('customer')
@@ -99,12 +91,43 @@ export class CustomerController {
     @Query('gender') gender?: 'M' | 'F' | 'U',
     @Query('cursor') cursor?: string,
     @Query('limit') limitValue?: string,
+    @Query('id_type') id_type?: string,
+    @Query('page') pageValue?: string,
   ): Promise<CustomerListResult> {
     const parsedLimit = Number(limitValue ?? 20);
     const limit = Number.isFinite(parsedLimit)
-      ? Math.min(Math.max(parsedLimit, 1), 200)
+      ? Math.min(Math.max(Math.floor(parsedLimit), 1), 200)
       : 20;
-    const where = customerWhere({ q, address, province, city, district, gender });
+    const where = customerWhere({ q, address, province, city, district, gender, id_type });
+    if (pageValue !== undefined) {
+      const requestedPage = Number(pageValue);
+      if (!Number.isSafeInteger(requestedPage) || requestedPage < 1 || cursor) {
+        throw new HttpException({ code: 40001, message: 'invalid_page' }, HttpStatus.BAD_REQUEST);
+      }
+      return this.prisma.$transaction(async (tx) => {
+        const total = await tx.customer.count({ where });
+        const totalPages = Math.ceil(total / limit);
+        const currentPage = Math.min(requestedPage, Math.max(1, totalPages));
+        const offset = (currentPage - 1) * limit;
+        const take = Math.min(limit, total - offset);
+        // Read from the nearer end of the ordered result so the last page is cheap.
+        const reverseOffset = total - offset - take;
+        const fromEnd = reverseOffset < offset;
+        const rows = total === 0 ? [] : await tx.customer.findMany({
+          where,
+          orderBy: { customer_id: fromEnd ? 'asc' : 'desc' },
+          skip: fromEnd ? reverseOffset : offset,
+          take,
+        });
+        if (fromEnd) rows.reverse();
+        return {
+          items: rows.map((row) => toCustomer(row as unknown as Record<string, unknown>)),
+          has_more: currentPage < totalPages,
+          next_cursor: currentPage < totalPages ? rows.at(-1)?.customer_id : undefined,
+          total, page: currentPage, total_pages: totalPages,
+        };
+      }, { isolationLevel: 'RepeatableRead', timeout: 60_000 });
+    }
     const finalWhere: Prisma.CustomerWhereInput = cursor
       ? { AND: [where, { customer_id: { lt: cursor } }] }
       : where;
@@ -123,6 +146,7 @@ export class CustomerController {
       next_cursor: hasMore ? page.at(-1)?.customer_id : undefined,
       has_more: hasMore,
       total,
+      total_pages: Math.ceil(total / limit),
     };
   }
 
@@ -166,6 +190,7 @@ export class CustomerController {
       city: query.city,
       district: query.district,
       gender: query.gender,
+      id_type: query.id_type,
     };
     return this.exports.create(filters, actorOf(request));
   }
@@ -224,17 +249,15 @@ export class CustomerController {
       throw new HttpException({ code: 40001, message: 'huji_no_must_be_digits' }, HttpStatus.BAD_REQUEST);
     }
 
-    const idCard = normalizeIdCard(dto.id_card);
-    if (!idCard) {
-      throw new HttpException({ code: 40001, message: 'id_card_required' }, HttpStatus.BAD_REQUEST);
-    }
-    const info = /^\d{17}[\dX]$/.test(idCard) ? parseIdCard(idCard) : {};
+    const document = requireDocument(dto.id_card, dto.id_type);
+    const idCard = document.id_card;
+    const info = document.id_type === 'resident_id' ? parseIdCard(idCard) : {};
     const customerId = ulid();
     const ingestMonth = deriveIngestMonth(dto.stat_time);
 
     const created = await this.prisma.$transaction(async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'id-card:' + idCard}, 0))`;
-      const duplicate = await tx.customerIdentity.findUnique({ where: { id_card: idCard } });
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'document:' + documentKey(document)}, 0))`;
+      const duplicate = await tx.customerIdentity.findUnique({ where: { id_type_id_card: document } });
       if (duplicate) {
         throw new HttpException({ code: 40901, message: 'id_card_exists' }, HttpStatus.CONFLICT);
       }
@@ -247,7 +270,7 @@ export class CustomerController {
           birth_date: dto.birth_date || info.birth_date
             ? new Date((dto.birth_date ?? info.birth_date) as string)
             : null,
-          id_card: idCard || null,
+          ...document,
           phone_masked: dto.phone_masked ?? null,
           address: dto.address ?? null,
           stat_time: dto.stat_time ? new Date(dto.stat_time) : null,
@@ -262,7 +285,7 @@ export class CustomerController {
         },
       });
       await tx.customerIdentity.create({
-        data: { id_card: idCard, customer_id: customerId, ingest_month: ingestMonth },
+        data: { ...document, customer_id: customerId, ingest_month: ingestMonth },
       });
       await tx.auditLog.create({
         data: {
@@ -289,6 +312,9 @@ export class CustomerController {
     if (!Number.isInteger(dto.version) || dto.version < 1) {
       throw new HttpException({ code: 40001, message: 'version_required' }, HttpStatus.BAD_REQUEST);
     }
+    // An omitted type preserves the existing namespace when editing a number.
+    // Explicit types can be validated without touching the database.
+    if (dto.id_card !== undefined && dto.id_type !== undefined) requireDocument(dto.id_card, dto.id_type);
     return this.prisma.$transaction(async (tx) => {
       const existing = await tx.customer.findFirst({
         where: { customer_id: id, is_deleted: false },
@@ -296,6 +322,9 @@ export class CustomerController {
       if (!existing) {
         throw new HttpException({ code: 40401, message: 'not_found' }, HttpStatus.NOT_FOUND);
       }
+      const document = dto.id_card !== undefined || dto.id_type !== undefined
+        ? requireDocument(dto.id_card ?? existing.id_card, dto.id_type ?? existing.id_type ?? 'resident_id')
+        : { id_card: existing.id_card as string, id_type: existing.id_type ?? 'resident_id' };
       const data: Prisma.CustomerUncheckedUpdateInput = {
         version: { increment: 1 },
         updated_at: new Date(),
@@ -313,16 +342,9 @@ export class CustomerController {
       if (dto.name !== undefined) data.name = dto.name;
       if (dto.gender !== undefined) data.gender = dto.gender;
       if (dto.birth_date !== undefined) data.birth_date = dto.birth_date ? new Date(dto.birth_date) : null;
-      let nextIdCard = existing.id_card;
-      if (dto.id_card !== undefined) {
-        nextIdCard = normalizeIdCard(dto.id_card);
-        if (!nextIdCard) {
-          throw new HttpException(
-            { code: 40001, message: 'id_card_required' },
-            HttpStatus.BAD_REQUEST,
-          );
-        }
-        data.id_card = nextIdCard;
+      if (dto.id_card !== undefined || dto.id_type !== undefined) {
+        data.id_card = document.id_card;
+        data.id_type = document.id_type;
       }
       if (dto.phone_masked !== undefined) data.phone_masked = dto.phone_masked || null;
       if (dto.address !== undefined) data.address = dto.address || null;
@@ -334,17 +356,14 @@ export class CustomerController {
       if (dto.education !== undefined) data.education = dto.education || null;
       if (dto.marital_status !== undefined) data.marital_status = dto.marital_status || null;
 
-      const idCardChanged = nextIdCard !== existing.id_card;
+      const idCardChanged = documentKey(document) !== documentKey(existing);
       if (idCardChanged) {
-        const lockKeys = [existing.id_card, nextIdCard]
-          .filter((value): value is string => Boolean(value))
-          .map((value) => `id-card:${value}`)
-          .sort();
+        const lockKeys = [documentKey(existing), documentKey(document)].map((key) => `document:${key}`).sort();
         for (const key of lockKeys) {
           await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`;
         }
         const duplicate = await tx.customerIdentity.findUnique({
-          where: { id_card: nextIdCard as string },
+          where: { id_type_id_card: document },
         });
         if (duplicate && duplicate.customer_id !== id) {
           throw new HttpException({ code: 40901, message: 'id_card_exists' }, HttpStatus.CONFLICT);
@@ -367,7 +386,7 @@ export class CustomerController {
         await tx.customerIdentity.deleteMany({ where: { customer_id: id } });
         await tx.customerIdentity.create({
           data: {
-            id_card: nextIdCard as string,
+            ...document,
             customer_id: id,
             ingest_month: existing.ingest_month,
           },

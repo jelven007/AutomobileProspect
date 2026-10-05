@@ -7,12 +7,15 @@ import ExcelJS from 'exceljs';
 import { ulid } from 'ulid';
 import type { Customer, CustomerListQuery, ExportJob } from '@leadops/types';
 import type { Prisma } from '@prisma/client';
+import { DOCUMENT_TYPES, type DocumentType } from '@leadops/ingest-service';
 import { PrismaService } from '../prisma/prisma.service';
+import { customerWhere } from './customer-filters';
 
 const EXPORT_COLUMNS: Array<{ header: string; key: keyof Customer; width: number }> = [
   { header: '编码编号', key: 'huji_no', width: 18 },
   { header: '姓名', key: 'name', width: 10 },
-  { header: '身份证', key: 'id_card', width: 20 },
+  { header: '证件类型', key: 'id_type', width: 26 },
+  { header: '证件号码', key: 'id_card', width: 20 },
   { header: '出生日期', key: 'birth_date', width: 12 },
   { header: '性别', key: 'gender', width: 6 },
   { header: '手机号', key: 'phone_masked', width: 14 },
@@ -26,22 +29,6 @@ const EXPORT_COLUMNS: Array<{ header: string; key: keyof Customer; width: number
   { header: '统计时间', key: 'stat_time', width: 12 },
   { header: '入库批次', key: 'ingest_batch', width: 20 },
 ];
-
-function whereFromFilters(filters: CustomerListQuery): Prisma.CustomerWhereInput {
-  const where: Prisma.CustomerWhereInput = { is_deleted: false };
-  if (filters.q) {
-    where.OR = [
-      { name: { contains: filters.q } },
-      { huji_no: { contains: filters.q } },
-    ];
-  }
-  if (filters.address) where.address = { contains: filters.address };
-  if (filters.province) where.province = { contains: filters.province };
-  if (filters.city) where.city = { contains: filters.city };
-  if (filters.district) where.district = { contains: filters.district };
-  if (filters.gender) where.gender = filters.gender;
-  return where;
-}
 
 function serializeJob(job: {
   job_id: string;
@@ -120,7 +107,7 @@ export class CustomerExportService implements OnModuleInit {
     const job = await this.prisma.exportJob.findUnique({ where: { job_id: jobId } });
     if (!job) return;
     const filters = job.filters as CustomerListQuery;
-    const where = whereFromFilters(filters);
+    const where = customerWhere(filters);
     const dataDir = process.env.DATA_DIR ?? join(process.cwd(), '.data');
     const exportsDir = join(dataDir, 'exports');
     const workDir = join(exportsDir, `${jobId}.work`);
@@ -233,6 +220,7 @@ export class CustomerExportService implements OnModuleInit {
         sheet.addRow({
           huji_no: customer.huji_no ?? '',
           name: customer.name,
+          id_type: DOCUMENT_TYPES[customer.id_type as DocumentType] ?? customer.id_type,
           id_card: customer.id_card ?? '',
           birth_date: customer.birth_date?.toISOString().slice(0, 10) ?? '',
           gender: customer.gender === 'M' ? '男' : customer.gender === 'F' ? '女' : '未知',

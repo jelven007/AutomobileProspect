@@ -4,6 +4,7 @@ export interface CustomerRow {
   stat_time?: string | null;
   birth_date?: string | null;
   gender?: 'M' | 'F' | 'U';
+  id_type?: string;
   id_card?: string;
   phone_masked?: string;
   address?: string;

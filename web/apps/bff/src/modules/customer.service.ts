@@ -1,6 +1,8 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { ulid } from 'ulid';
 import type { Customer } from '@leadops/types';
+import type { Prisma } from '@prisma/client';
+import { documentKey, normalizeDocument } from '@leadops/ingest-service';
 import { PrismaService } from '../prisma/prisma.service';
 
 export interface IngestRow extends Partial<Customer> {
@@ -39,6 +41,7 @@ interface StagedIngestRow {
   name: string;
   gender: string | null;
   birth_date: string | null;
+  id_type: string;
   id_card: string;
   phone_masked: string | null;
   address: string | null;
@@ -67,6 +70,7 @@ CREATE TEMP TABLE customer_ingest_stage (
   name VARCHAR(64) NOT NULL,
   gender CHAR(1),
   birth_date DATE,
+  id_type VARCHAR(32) NOT NULL,
   id_card VARCHAR(32) NOT NULL,
   phone_masked VARCHAR(64),
   address VARCHAR(256),
@@ -94,6 +98,7 @@ SELECT *
     name VARCHAR(64),
     gender CHAR(1),
     birth_date DATE,
+    id_type VARCHAR(32),
     id_card VARCHAR(32),
     phone_masked VARCHAR(64),
     address VARCHAR(256),
@@ -137,7 +142,7 @@ SELECT count(*)::bigint AS count FROM removed
 const EXPECTED_UPDATES_SQL = `
 SELECT count(*)::bigint AS count
   FROM customer_ingest_stage AS s
-  JOIN customer_identity AS ci ON ci.id_card = s.id_card
+  JOIN customer_identity AS ci ON ci.id_type = s.id_type AND ci.id_card = s.id_card
 `;
 
 const UPDATE_EXISTING_SQL = `
@@ -161,7 +166,7 @@ UPDATE customer AS c
        version = c.version + 1,
        updated_at = NOW()
   FROM customer_ingest_stage AS s
-  JOIN customer_identity AS ci ON ci.id_card = s.id_card
+  JOIN customer_identity AS ci ON ci.id_type = s.id_type AND ci.id_card = s.id_card
  WHERE c.customer_id = ci.customer_id
    AND c.ingest_month = ci.ingest_month
    AND c.is_deleted = FALSE
@@ -169,24 +174,24 @@ UPDATE customer AS c
 
 const INSERT_NEW_SQL = `
 INSERT INTO customer (
-  customer_id, huji_no, name, gender, birth_date, id_card, phone_masked,
+  customer_id, huji_no, name, gender, birth_date, id_type, id_card, phone_masked,
   address, stat_time, province, city, district, occupation, education,
   marital_status, source_file, source_row, ingest_batch, ingest_month
 )
-SELECT s.customer_id, s.huji_no, s.name, s.gender, s.birth_date, s.id_card,
+SELECT s.customer_id, s.huji_no, s.name, s.gender, s.birth_date, s.id_type, s.id_card,
        s.phone_masked, s.address, s.stat_time, s.province, s.city, s.district,
        s.occupation, s.education, s.marital_status, s.source_file, s.source_row,
        s.ingest_batch, s.ingest_month
   FROM customer_ingest_stage AS s
-  LEFT JOIN customer_identity AS ci ON ci.id_card = s.id_card
+  LEFT JOIN customer_identity AS ci ON ci.id_type = s.id_type AND ci.id_card = s.id_card
  WHERE ci.id_card IS NULL
 `;
 
 const INSERT_CUSTOMER_IDENTITIES_SQL = `
-INSERT INTO customer_identity (id_card, customer_id, ingest_month)
-SELECT s.id_card, s.customer_id, s.ingest_month
+INSERT INTO customer_identity (id_type, id_card, customer_id, ingest_month)
+SELECT s.id_type, s.id_card, s.customer_id, s.ingest_month
   FROM customer_ingest_stage AS s
-  LEFT JOIN customer_identity AS ci ON ci.id_card = s.id_card
+  LEFT JOIN customer_identity AS ci ON ci.id_type = s.id_type AND ci.id_card = s.id_card
  WHERE ci.id_card IS NULL
 `;
 
@@ -200,7 +205,7 @@ SELECT s.ingest_batch,
        COALESCE(ci.customer_id, s.customer_id),
        COALESCE(ci.ingest_month, s.ingest_month)
   FROM customer_ingest_stage AS s
-  LEFT JOIN customer_identity AS ci ON ci.id_card = s.id_card
+  LEFT JOIN customer_identity AS ci ON ci.id_type = s.id_type AND ci.id_card = s.id_card
  WHERE s.ingest_batch IS NOT NULL
    AND s.source_file IS NOT NULL
    AND s.source_row IS NOT NULL
@@ -217,6 +222,7 @@ export function toCustomer(row: Record<string, unknown>): Customer {
     name: row.name as string,
     gender: (row.gender as 'M' | 'F' | 'U' | null) ?? undefined,
     birth_date: birth ? birth.toISOString().slice(0, 10) : undefined,
+    id_type: (row.id_type as string | undefined) ?? 'resident_id',
     id_card: (row.id_card as string | null) ?? undefined,
     phone_masked: (row.phone_masked as string | null) ?? undefined,
     address: (row.address as string | null) ?? undefined,
@@ -256,9 +262,10 @@ function sourceLockKey(row: StagedIngestRow): string | null {
 function prepareRows(rows: IngestRow[]): StagedIngestRow[] {
   const byIdCard = new Map<string, { row: IngestRow; index: number }>();
   rows.forEach((row, index) => {
-    const idCard = optionalString(row.id_card)?.toUpperCase();
-    if (!idCard) throw new Error('id_card_required');
-    byIdCard.set(idCard, { row: { ...row, id_card: idCard }, index });
+    const document = normalizeDocument(row.id_card, row.id_type);
+    if (document.error) throw new Error(document.error);
+    const normalized = { ...row, id_type: document.type, id_card: document.value };
+    byIdCard.set(documentKey(normalized), { row: normalized, index });
   });
 
   const ingestMonth = deriveIngestMonth().toISOString().slice(0, 10);
@@ -271,6 +278,7 @@ function prepareRows(rows: IngestRow[]): StagedIngestRow[] {
       name: row.name,
       gender: optionalString(row.gender),
       birth_date: optionalString(row.birth_date),
+      id_type: row.id_type as string,
       id_card: optionalString(row.id_card) as string,
       phone_masked: optionalString(row.phone_masked),
       address: optionalString(row.address),
@@ -301,14 +309,18 @@ export class CustomerService {
     return result.inserted === 1 ? 'insert' : 'update';
   }
 
-  /** 身份证是唯一合并依据；编码编号仅作为普通字段保存。 */
-  async upsertBatch(rows: IngestRow[], progress?: IngestProgress): Promise<UpsertBatchResult> {
+  /** 证件类型 + 号码是唯一合并依据；编码编号仅作为普通字段保存。 */
+  async upsertBatch(
+    rows: IngestRow[],
+    progress?: IngestProgress,
+    repairAudit?: { actor: string; jobId: string },
+  ): Promise<UpsertBatchResult> {
     if (rows.length === 0) {
       return { inserted: 0, updated: 0, skipped: 0, conflicts: [] };
     }
     const stagedRows = prepareRows(rows);
     const lockKeys = [...new Set(stagedRows.flatMap((row) => {
-      const keys = [`id-card:${row.id_card}`];
+      const keys = [`document:${documentKey(row)}`];
       const source = sourceLockKey(row);
       if (source) keys.push(source);
       return keys;
@@ -325,6 +337,15 @@ export class CustomerService {
       const expectedUpdates = countOf(
         await tx.$queryRawUnsafe<CountResult[]>(EXPECTED_UPDATES_SQL),
       );
+      // Repair snapshots and writes share the same identity locks and transaction.
+      const snapshotSql = `
+        SELECT c.* FROM customer_ingest_stage s
+        JOIN customer_identity ci ON ci.id_type = s.id_type AND ci.id_card = s.id_card
+        JOIN customer c ON c.customer_id = ci.customer_id AND c.ingest_month = ci.ingest_month
+      `;
+      const before = repairAudit
+        ? await tx.$queryRawUnsafe<Record<string, unknown>[]>(snapshotSql)
+        : [];
       const updated = await tx.$executeRawUnsafe(UPDATE_EXISTING_SQL);
       if (updated !== expectedUpdates) {
         throw new Error('customer_identity_target_missing');
@@ -336,6 +357,19 @@ export class CustomerService {
       const remaining = stagedRows.length - skipped;
       if (inserted + updated !== remaining) {
         throw new Error(`ingest_batch_write_mismatch:${remaining}:${inserted + updated}`);
+      }
+      if (repairAudit && remaining > 0) {
+        const after = await tx.$queryRawUnsafe<Record<string, unknown>[]>(snapshotSql);
+        await tx.auditLog.create({
+          data: {
+            actor: repairAudit.actor,
+            action: 'customer.repair_documents',
+            entity_type: 'ingest_job',
+            entity_id: repairAudit.jobId,
+            before_data: JSON.parse(JSON.stringify(before)) as Prisma.InputJsonValue,
+            after_data: JSON.parse(JSON.stringify({ inserted, updated, customers: after })) as Prisma.InputJsonValue,
+          },
+        });
       }
 
       if (progress) {

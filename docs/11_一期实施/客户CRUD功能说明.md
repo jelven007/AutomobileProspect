@@ -1,5 +1,7 @@
 # 客户 CRUD 功能说明（一期）
 
+> **现行规则（2026-10-05）**：参见 [多证件导入与定向补录](多证件导入与定向补录.md)。客户按「证件类型 + 证件号码」唯一匹配，列表、表单与批量导出均包含证件类型；编码编号仅为展示字段。以下为历史设计记录，其中编码唯一、仅 18 位身份证、自动脱敏等描述已被现行规则取代。
+
 > 文档编号：PM-LeadOps-P1-C01　　版本：v1.3　　日期：2026-10-04
 
 ## 1. 入口
@@ -13,10 +15,11 @@
 
 | 元素 | 说明 |
 |---|---|
-| 搜索栏 | 姓名（模糊）、编码编号（精确）、性别、**地址关键字**、**省份**、**城市**、入库批次 |
-| 操作栏 | 新增、批量导入、导出、刷新 |
-| 表格列 | 编码编号、姓名、性别、出生日期、身份证（脱敏）、脱敏手机、省份、城市、区县、职业、学历、婚姻、地址、统计时间、入库批次、操作 |
-| 分页 | 每页 20/50/100；深分页用游标 `cursor_after=customer_id` |
+| 搜索栏 | 姓名/编码编号、地址关键字、省份、城市、区县、性别、证件类型；采用紧凑小尺寸控件 |
+| 操作栏 | 新增客户、批量导入、批量导出、批量删除、清空全部、刷新、展开/收起内容 |
+| 表格列 | 编码编号、姓名、证件类型、证件号码、出生日期、性别、手机号、省份、城市、区县、地址、职业、学历、婚姻、统计时间、入库批次、操作 |
+| 分页 | 每页 50/100/200；显示总页数，支持首页、上一页、下一页、尾页及输入页码跳转 |
+| 伸缩 | 侧栏可收起；内容区随窗口与侧栏宽度自适应；表格列宽可拖动或键盘微调，长文本可展开/收起 |
 | 批量 | 批量选择 → 批量删除 / 导出 |
 
 ### 2.2 详情页 `/customer/:id`
@@ -44,7 +47,7 @@
 
 ### 2.4 批量导入
 
-- 入口：客户管理页「批量导入 xlsx」按钮，打开 Modal
+- 入口：客户管理页「批量导入」按钮，打开 Modal
 - 上传：拖拽 / 点击，单文件 ≤ 200 MB（更大体量请走 ingest-service 对接对象存储）
 - 清洗：**服务端复用 `@leadops/ingest-service`**，走同一套 pipeline
   - 丢弃第 1（所属户籍站）/3（居住地址）/倒数两列
@@ -70,7 +73,7 @@
 
 | Method | Path | 说明 |
 |---|---|---|
-| GET | `/bff/customer` | 列表，支持 `q / address / province / city / gender / cursor / limit` |
+| GET | `/bff/customer` | 列表，支持 `q / address / province / city / district / gender / id_type / page / limit`；旧客户端仍可使用 `cursor` |
 | GET | `/bff/customer/:id` | 详情 |
 | POST | `/bff/customer` | 新增（`huji_no` 冲突返回 409） |
 | PUT | `/bff/customer/:id` | 编辑（必带 `version`） |
@@ -83,7 +86,7 @@
 ### 3.1 列表请求
 
 ```http
-GET /bff/customer?q=谭&address=车家湾&limit=50&cursor=182312
+GET /bff/customer?q=谭&address=车家湾&id_type=resident_id&page=3&limit=50
 ```
 
 响应：
@@ -115,7 +118,10 @@ GET /bff/customer?q=谭&address=车家湾&limit=50&cursor=182312
       }
     ],
     "next_cursor": "182413",
-    "has_more": true
+    "has_more": true,
+    "total": 7433143,
+    "page": 3,
+    "total_pages": 148663
   }
 }
 ```
@@ -137,7 +143,7 @@ GET /bff/customer?q=谭&address=车家湾&limit=50&cursor=182312
       { "huji_no": "9161337", "against": "9161200", "reason": "id_card_conflict" }
     ],
     "errors": [
-      { "row": 42, "reason": "invalid_huji_no" }
+      { "row": 42, "reason": "invalid_id_card_format" }
     ],
     "elapsed_ms": 7345
   }
@@ -164,7 +170,8 @@ GET /bff/customer?q=谭&address=车家湾&limit=50&cursor=182312
 
 ## 5. 交互细节
 
-- 列表翻页用**游标**（`cursor_after`），千万行场景下避免 `OFFSET` 深分页
+- 页面查询使用一致性事务同时获取总条数和数据；末页会从倒序结果的近端读取，避免尾页扫描全部记录。
+- 兼容接口仍支持游标顺序翻页；指定页码需要计算位置，743 万条无筛选数据跳到中间页实测约 10.56 秒，首页、相邻页和尾页明显更快。
 - 搜索姓名、地址用 **PG trgm** 索引；编码编号走等值索引
 - 删除是**软删除**（`is_deleted = TRUE`），30 天后硬删
 - 新增 / 编辑在提交前对 `huji_no` 做纯数字校验，前后端一致

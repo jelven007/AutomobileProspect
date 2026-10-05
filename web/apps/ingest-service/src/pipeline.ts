@@ -1,6 +1,7 @@
 import type { CustomerRow, DedupeConfig, IngestSchema, SchemaColumn } from './types';
 import { TRANSFORMS } from './transforms';
-import { normalizeIdCardForStorage, parseIdCard } from './id-card';
+import { parseIdCard } from './id-card';
+import { documentKey, normalizeDocument } from './document';
 
 export class CleaningError extends Error {
   constructor(public readonly reason: string, public readonly raw: unknown[]) {
@@ -26,8 +27,9 @@ const HEADER_TO_FIELD: Array<{ keywords: string[]; field: keyof CustomerRow; tra
   { keywords: ['编码编号', '编码号', '户籍编号', '户籍号', '客户编号', '编号'], field: 'huji_no', transform: 'strip_prefix_digits', transform_args: ['2016户籍统计'] },
   { keywords: ['出生日期', '出生年月', '出生日', '生日'], field: 'birth_date', transform: 'parse_date' },
   { keywords: ['性别'], field: 'gender', transform: 'map_gender' },
-  { keywords: ['公民身份号码', '身份证件号码', '身份证件号', '身份证号码', '身份证号', '身份证', '证件号码', '证件号'], field: 'id_card', transform: 'mask_id_card' },
-  { keywords: ['客户姓名', '姓名', '名字', '客户名'], field: 'name' },
+  { keywords: ['证件类型', '证件种类', '身份证件类型'], field: 'id_type' },
+  { keywords: ['公民身份号码', '身份证件号码', '身份证件号', '身份证号码', '身份证号', '身份证', '证件号码', '证件号', '组织机构代码', '统一社会信用代码', '护照号码', '通行证号码'], field: 'id_card', transform: 'mask_id_card' },
+  { keywords: ['客户姓名', '姓名', '名字', '客户名', '企业名称', '机构名称'], field: 'name' },
   { keywords: ['手机号码', '移动电话', '联系电话', '联系方式', '客户手机', '客户电话', '手机号', '手机', '电话'], field: 'phone_masked', transform: 'mask_phone_mid4' },
   { keywords: ['详细地址', '家庭地址', '通讯地址', '现住地址', '现住址', '住址', '地址'], field: 'address' },
   { keywords: ['省份', '所在省', '省'], field: 'province' },
@@ -214,9 +216,18 @@ export function cleanRowDetailed(
     (row as Record<string, unknown>)[col.field] = value as never;
   }
 
-  // Pass 2：身份证明文派生字段。只在原字段缺失时填入，避免覆盖 Excel 中已有的真值。
-  if (idCardRaw) {
-    const info = parseIdCard(idCardRaw);
+  // 先准入，再派生和去重，避免“未知”等占位文本成为不同客户共享的身份键。
+  const document = normalizeDocument(idCardRaw, row.id_type);
+  if (document.error) {
+    throw new CleaningError(document.error === 'id_card_required' ? 'required_missing:id_card' : document.error, rawRow);
+  }
+  row.id_card = document.value;
+  row.id_type = document.type;
+  warnings.push(...document.warnings);
+
+  // Pass 2：用原始身份证派生，保留日期修正告警；只补充原字段缺失的值。
+  if (idCardRaw && row.id_type === 'resident_id') {
+    const info = parseIdCard(idCardRaw.normalize('NFKC').replace(/[\s\u200B\u200C\u200D\u00AD]/g, '').replace(/^#(.+)#$/, '$1'));
     if (info.province && !row.province) row.province = info.province;
     if (info.city && !row.city) row.city = info.city;
     if (info.district && !row.district) row.district = info.district;
@@ -229,17 +240,6 @@ export function cleanRowDetailed(
     if (!info.district) warnings.push('id_card_district_unknown');
   }
 
-  // Pass 3：身份证清洗（15→18 位扩展）后入库
-  if (idCardRaw) {
-    row.id_card = normalizeIdCardForStorage(idCardRaw).value;
-  }
-
-  if (!row.id_card) {
-    throw new CleaningError('required_missing:id_card', rawRow);
-  }
-  if (row.huji_no && !/^\d+$/.test(row.huji_no)) {
-    throw new CleaningError('invalid_huji_no', rawRow);
-  }
   if (!row.name) {
     throw new CleaningError('required_missing:name', rawRow);
   }
@@ -266,7 +266,9 @@ export class RowDeduper {
 
   /** 返回 true 表示入列成功；false 表示被同 key 覆盖/忽略。 */
   add(row: CustomerRow): boolean {
-    const primary = String(row[this.cfg.key] ?? '');
+    const primary = this.cfg.key === 'id_card' && row.id_card
+      ? documentKey(row)
+      : String(row[this.cfg.key] ?? '');
     const k = primary || `__row_${row.source_row ?? Math.random().toString(36).slice(2)}`;
 
     if (this.cfg.secondary_key_warn) {

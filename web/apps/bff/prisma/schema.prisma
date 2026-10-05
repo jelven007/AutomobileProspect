@@ -2,7 +2,7 @@
 // 与 ingest-service/migrations/001_init.sql 严格对齐，不走 prisma migrate。
 // customer 表是分区表（PARTITION BY RANGE ingest_month），Prisma 不原生支持分区，
 // 但只要字段对齐、每条记录带 ingest_month，client 可正常读写。
-// 部分唯一索引 uk_customer_id_card_month (id_card, ingest_month) WHERE is_deleted=FALSE 由 DDL 兜底，
+// 部分唯一索引 uk_customer_document_month (id_type, id_card, ingest_month) WHERE is_deleted=FALSE 由 DDL 兜底，
 // Prisma schema 这里不声明 @@unique，避免 push 回去改坏约束。
 
 generator client {
@@ -20,6 +20,7 @@ model Customer {
   name           String    @db.VarChar(64)
   gender         String?   @db.Char(1)
   birth_date     DateTime? @db.Date
+  id_type        String    @default("resident_id") @db.VarChar(32)
   id_card        String?   @db.VarChar(32)
   phone_masked   String?   @db.VarChar(64)
   address        String?   @db.VarChar(256)
@@ -80,13 +81,15 @@ model IngestJob {
 }
 
 model CustomerIdentity {
-  id_card      String   @id @db.VarChar(32)
+  id_type      String   @default("resident_id") @db.VarChar(32)
+  id_card      String   @db.VarChar(32)
   customer_id  String   @db.Char(26)
   ingest_month DateTime @db.Date
   created_at   DateTime @default(now()) @db.Timestamptz(6)
   updated_at   DateTime @default(now()) @db.Timestamptz(6)
   customer     Customer @relation(fields: [customer_id, ingest_month], references: [customer_id, ingest_month], onDelete: Cascade)
 
+  @@id([id_type, id_card])
   @@map("customer_identity")
 }
 

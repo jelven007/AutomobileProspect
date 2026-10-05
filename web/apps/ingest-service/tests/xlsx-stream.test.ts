@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import ExcelJS from 'exceljs';
 import { afterEach, describe, expect, it } from 'vitest';
-import { buildDynamicMappings } from '../src/pipeline';
+import { buildDynamicMappings, cleanRow } from '../src/pipeline';
+import type { IngestSchema } from '../src/types';
 import { streamXlsx } from '../src/xlsx-stream';
 
 const tempDirs: string[] = [];
@@ -37,6 +38,78 @@ afterEach(async () => {
 });
 
 describe('streamXlsx', () => {
+  it('reads a normal Workbook file whose worksheets precede workbook metadata', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'leadops-xlsx-test-'));
+    tempDirs.push(dir);
+    const path = join(dir, 'normal.xlsx');
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('客户');
+    sheet.addRow(['姓名', '身份证']);
+    sheet.addRow(['张三', '510223197410137219']);
+    await workbook.xlsx.writeFile(path);
+    const rows = [];
+    for await (const row of streamXlsx(createReadStream(path), { skipHeaderRows: 0 })) rows.push(row);
+    expect(rows.map((row) => row.values)).toEqual([
+      ['姓名', '身份证'], ['张三', '510223197410137219'],
+    ]);
+    const mappings = buildDynamicMappings(rows[0].values);
+    const schema = {
+      columns: { mappings: mappings.mappings, drop_indexes: mappings.dropIndexes },
+    } as IngestSchema;
+    expect(cleanRow(rows[1].values, schema, {
+      source_file: 'normal.xlsx', source_row: rows[1].rowNo, ingest_batch: 'test',
+    })).toMatchObject({ name: '张三', id_card: '510223197410137219' });
+  });
+
+  it.each([true, false])('preserves every Chinese/emoji cell across chunks (shared=%s)', async (shared) => {
+    const dir = await mkdtemp(join(tmpdir(), 'leadops-xlsx-test-'));
+    tempDirs.push(dir);
+    const path = join(dir, 'unicode.xlsx');
+    const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
+      filename: path, useSharedStrings: shared, useStyles: false,
+    });
+    const sheet = workbook.addWorksheet('客户');
+    const expected = Array.from({ length: 5000 }, (_, index) => [
+      `客户${index}张三🙂`, `重庆市綦江县赶水镇太公村${index}号 & <门牌> &amp;`,
+    ]);
+    for (const values of expected) sheet.addRow(values).commit();
+    await sheet.commit();
+    await workbook.commit();
+    const actual = [];
+    for await (const row of streamXlsx(createReadStream(path), { skipHeaderRows: 0 })) actual.push(row.values);
+    expect(actual).toEqual(expected);
+  });
+
+  it('selects sheets in workbook order, retaining sparse columns, rich text and cached formulas', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'leadops-xlsx-test-'));
+    tempDirs.push(dir);
+    const path = join(dir, 'ordered.xlsx');
+    const workbook = new ExcelJS.Workbook();
+    workbook.addWorksheet('先创建').addRow(['另一个工作表']);
+    const sheet = workbook.addWorksheet('先显示');
+    // 构造“显示顺序与 sheet1/sheet2 文件名相反”的合法工作簿。
+    (sheet as unknown as { orderNo: number }).orderNo = 0;
+    sheet.getCell('A1').value = '表头';
+    sheet.getCell('A3').value = { richText: [{ text: '中文' }, { text: '🙂&amp;' }] };
+    sheet.getCell('C3').value = { formula: '1+1', result: 2 };
+    sheet.getCell('D3').value = { formula: '"缓存中文"', result: '缓存中文' };
+    sheet.getCell('F3').value = true;
+    await workbook.xlsx.writeFile(path);
+    const rows = [];
+    for await (const row of streamXlsx(createReadStream(path))) rows.push(row);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].rowNo).toBe(3);
+    expect(Array.from(rows[0].values)).toEqual(['中文🙂&amp;', undefined, 2, '缓存中文', undefined, true]);
+    const otherRows = [];
+    for await (const row of streamXlsx(createReadStream(path), { sheetIndex: 1, skipHeaderRows: 0 })) {
+      otherRows.push(row.values);
+    }
+    expect(otherRows).toEqual([['另一个工作表']]);
+    await expect((async () => {
+      for await (const _row of streamXlsx(createReadStream(path), { sheetIndex: 2 })) { /* drain */ }
+    })()).rejects.toThrow('xlsx_worksheet_missing:2');
+  });
+
   it('resolves shared-string cells when worksheet entries precede sharedStrings.xml', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'leadops-xlsx-test-'));
     tempDirs.push(dir);
