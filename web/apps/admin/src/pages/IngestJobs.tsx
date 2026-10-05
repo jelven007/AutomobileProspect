@@ -9,6 +9,7 @@ const STATUS_COLOR: Record<IngestJob['status'], string> = {
   RUNNING: 'processing',
   SUCCESS: 'success',
   FAILED: 'error',
+  SUPERSEDED: 'default',
 };
 
 export default function IngestJobsPage() {

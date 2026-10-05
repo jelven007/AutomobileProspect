@@ -27,6 +27,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { CustomerService, type IngestRow } from './customer.service';
 
 const BATCH_SIZE = 1000;
+const IMPORT_PIPELINE_VERSION = 2;
 
 function loadSchema(): IngestSchema {
   const path = process.env.INGEST_SCHEMA_PATH
@@ -37,6 +38,73 @@ function loadSchema(): IngestSchema {
 
 function asNumber(value: bigint | number): number {
   return typeof value === 'bigint' ? Number(value) : value;
+}
+
+function looksLikePhone(value: unknown): boolean {
+  if (value == null) return false;
+  const normalized = String(value)
+    .trim()
+    .replace(/[０-９]/g, (char) => String.fromCharCode(char.charCodeAt(0) - 0xFEE0))
+    .replace(/[\s()-]/g, '');
+  return /^\+?\d{7,15}$/.test(normalized);
+}
+
+export function resolveImportLayout(
+  baseSchema: IngestSchema,
+  firstRow: unknown[],
+): {
+  schema: IngestSchema;
+  hasHeader: boolean;
+  detected: Array<{ index: number; header: string; field: string }>;
+} {
+  const dynamic = buildDynamicMappings(firstRow);
+  const detectedFields = new Set(dynamic.detected.map((item) => item.field));
+  const hasHeader = detectedFields.has('id_card') && detectedFields.has('name');
+
+  if (hasHeader) {
+    return {
+      schema: {
+        ...baseSchema,
+        columns: {
+          drop_indexes: dynamic.dropIndexes,
+          mappings: dynamic.mappings,
+        },
+      },
+      hasHeader: true,
+      detected: dynamic.detected,
+    };
+  }
+
+  return {
+    schema: adaptPhoneAddressMappings(baseSchema, firstRow),
+    hasHeader: false,
+    detected: [],
+  };
+}
+
+export function adaptPhoneAddressMappings(
+  schema: IngestSchema,
+  dataRow: unknown[],
+): IngestSchema {
+  const mappings = schema.columns.mappings.map((mapping) => ({ ...mapping }));
+  const phone = mappings.find((mapping) => mapping.field === 'phone_masked');
+  const address = mappings.find((mapping) => mapping.field === 'address');
+  if (
+    phone
+    && address
+    && !looksLikePhone(dataRow[phone.index - 1])
+    && looksLikePhone(dataRow[address.index - 1])
+  ) {
+    [phone.index, address.index] = [address.index, phone.index];
+  }
+
+  return {
+    ...schema,
+    columns: {
+      ...schema.columns,
+      mappings,
+    },
+  };
 }
 
 @Injectable()
@@ -83,12 +151,26 @@ export class CustomerImportService implements OnModuleInit {
 
       const fileHash = hash.digest('hex');
       const existing = await this.prisma.ingestJob.findFirst({
-        where: { file_hash: fileHash, status: 'SUCCESS' },
+        where: {
+          file_hash: fileHash,
+          status: 'SUCCESS',
+        },
         orderBy: { finished_at: 'desc' },
       });
-      if (existing?.report_json) {
-        await rm(filePath, { force: true });
-        return existing.report_json as unknown as CustomerImportReport;
+      if (existing) {
+        const existingReport = existing.report_json as unknown as CustomerImportReport | null;
+        if (existingReport?.pipeline_version === IMPORT_PIPELINE_VERSION) {
+          await rm(filePath, { force: true });
+          return existingReport;
+        }
+        await this.prisma.ingestJob.update({
+          where: { job_id: existing.job_id },
+          data: {
+            status: 'SUPERSEDED',
+            error: `superseded_by_import_pipeline_v${IMPORT_PIPELINE_VERSION}`,
+            updated_at: new Date(),
+          },
+        });
       }
 
       await this.prisma.ingestJob.create({
@@ -162,6 +244,7 @@ export class CustomerImportService implements OnModuleInit {
     const baseSchema = loadSchema();
     const started = Date.now();
     const report: CustomerImportReport = {
+      pipeline_version: IMPORT_PIPELINE_VERSION,
       job_id: jobId,
       file_name: job.file_name,
       total_rows: 0,
@@ -196,6 +279,7 @@ export class CustomerImportService implements OnModuleInit {
 
     let schema = baseSchema;
     let headerParsed = false;
+    let headerRowsToSkip = 0;
     let buffer: IngestRow[] = [];
     let committedRow = 0;
 
@@ -238,25 +322,23 @@ export class CustomerImportService implements OnModuleInit {
       })) {
         if (!headerParsed) {
           headerParsed = true;
-          const { mappings, dropIndexes, detected } = buildDynamicMappings(values);
-          if (mappings.length > 0) {
-            schema = {
-              ...baseSchema,
-              columns: { drop_indexes: dropIndexes, mappings },
-            };
-            report.detected_mapping = detected.map((item) => ({
+          const layout = resolveImportLayout(baseSchema, values);
+          schema = layout.schema;
+          headerRowsToSkip = layout.hasHeader ? baseSchema.parse.skip_header_rows : 0;
+          if (layout.hasHeader) {
+            report.detected_mapping = layout.detected.map((item) => ({
               index: item.index,
               header: item.header,
               field: item.field,
             }));
           }
-          if (baseSchema.parse.skip_header_rows > 0) continue;
         }
-        if (rowNo <= baseSchema.parse.skip_header_rows) continue;
+        if (rowNo <= headerRowsToSkip) continue;
 
         report.total_rows += 1;
         try {
-          const { row, warnings } = cleanRowDetailed(values, schema, {
+          const rowSchema = adaptPhoneAddressMappings(schema, values);
+          const { row, warnings } = cleanRowDetailed(values, rowSchema, {
             source_file: job.file_name,
             source_row: rowNo,
             ingest_batch: jobId,

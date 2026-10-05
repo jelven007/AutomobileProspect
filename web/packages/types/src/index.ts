@@ -138,7 +138,7 @@ export interface IngestJob {
   source_bucket?: string;
   source_prefix?: string;
   file_name?: string;
-  status: 'PENDING' | 'RUNNING' | 'SUCCESS' | 'FAILED';
+  status: 'PENDING' | 'RUNNING' | 'SUCCESS' | 'FAILED' | 'SUPERSEDED';
   total_rows: number;
   success_rows: number;
   skipped_rows: number;
@@ -166,6 +166,7 @@ export interface ExportJob {
 }
 
 export interface CustomerImportReport {
+  pipeline_version: number;
   job_id: string;
   file_name: string;
   total_rows: number;
