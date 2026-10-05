@@ -28,6 +28,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @leadops/ingest-service region:update
       - run: pnpm --filter @leadops/ingest-service region:snapshot
+      - run: pnpm --filter @leadops/ingest-service region:crosswalk
       - run: pnpm --filter @leadops/ingest-service test
       - run: pnpm --filter @leadops/ingest-service typecheck
       - uses: peter-evans/create-pull-request@v7

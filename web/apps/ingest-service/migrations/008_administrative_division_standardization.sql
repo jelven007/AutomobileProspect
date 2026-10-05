@@ -57,13 +57,19 @@ CREATE TABLE IF NOT EXISTS administrative_division_crosswalk (
   target_dataset_version VARCHAR(32) NOT NULL,
   source_code        CHAR(6)     NOT NULL,
   source_name        VARCHAR(64),
+  source_names       JSONB       NOT NULL DEFAULT '[]'::JSONB,
   source_level       VARCHAR(16) NOT NULL,
   source_type        VARCHAR(32),
+  source_parent_codes JSONB      NOT NULL DEFAULT '[]'::JSONB,
+  source_first_year  SMALLINT,
+  source_last_year   SMALLINT,
   target_code        CHAR(6),
+  candidate_target_codes JSONB   NOT NULL DEFAULT '[]'::JSONB,
   mapping_kind       VARCHAR(32) NOT NULL,
   mapping_scope      VARCHAR(16) NOT NULL,
   auto_apply         BOOLEAN     NOT NULL DEFAULT FALSE,
   confidence         SMALLINT    NOT NULL,
+  mapping_reason     VARCHAR(64) NOT NULL,
   evidence           TEXT        NOT NULL,
   created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   FOREIGN KEY (target_dataset_version, target_code)
@@ -72,15 +78,17 @@ CREATE TABLE IF NOT EXISTS administrative_division_crosswalk (
   CHECK (source_code ~ '^[0-9]{6}$'),
   CHECK (target_code IS NULL OR target_code ~ '^[0-9]{6}$'),
   CHECK (source_level IN ('province', 'prefecture', 'county')),
-  CHECK (mapping_scope IN ('full', 'parent_only', 'ambiguous')),
+  CHECK (mapping_scope IN ('full', 'parent_only', 'ambiguous', 'unresolved')),
   CHECK (confidence BETWEEN 0 AND 100),
-  CHECK (NOT auto_apply OR (mapping_scope <> 'ambiguous' AND target_code IS NOT NULL))
+  CHECK (
+    NOT auto_apply OR (
+      mapping_scope IN ('full', 'parent_only') AND target_code IS NOT NULL
+    )
+  )
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS uk_administrative_division_crosswalk
-  ON administrative_division_crosswalk (
-    rule_version, source_code, COALESCE(target_code, '000000')
-  );
+  ON administrative_division_crosswalk (rule_version, source_code);
 
 ALTER TABLE customer
   ADD COLUMN IF NOT EXISTS origin_region_code CHAR(6),
@@ -115,7 +123,8 @@ ALTER TABLE customer
   DROP CONSTRAINT IF EXISTS customer_region_mapping_method_check,
   ADD CONSTRAINT customer_region_mapping_method_check CHECK (
     region_mapping_method IS NULL OR region_mapping_method IN (
-      'current_code', 'historical_crosswalk', 'exact_name', 'manual', 'none'
+      'current_code', 'current_parent_code', 'historical_crosswalk',
+      'exact_name', 'manual', 'none'
     )
   ) NOT VALID,
   DROP CONSTRAINT IF EXISTS customer_region_confidence_check,

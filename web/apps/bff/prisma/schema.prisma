@@ -186,13 +186,19 @@ model AdministrativeDivisionCrosswalk {
   target_dataset_version String   @db.VarChar(32)
   source_code            String   @db.Char(6)
   source_name            String?  @db.VarChar(64)
+  source_names           Json     @default("[]")
   source_level           String   @db.VarChar(16)
   source_type            String?  @db.VarChar(32)
+  source_parent_codes    Json     @default("[]")
+  source_first_year      Int?     @db.SmallInt
+  source_last_year       Int?     @db.SmallInt
   target_code            String?  @db.Char(6)
+  candidate_target_codes Json     @default("[]")
   mapping_kind           String   @db.VarChar(32)
   mapping_scope          String   @db.VarChar(16)
   auto_apply             Boolean  @default(false)
   confidence             Int      @db.SmallInt
+  mapping_reason         String   @db.VarChar(64)
   evidence               String
   created_at             DateTime @default(now()) @db.Timestamptz(6)
 

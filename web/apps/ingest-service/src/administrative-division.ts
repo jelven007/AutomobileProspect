@@ -9,7 +9,12 @@ export type AdministrativeDivisionLevel = 'province' | 'prefecture' | 'county';
 export type RegionMappingStatus =
   'current' | 'historical_mapped' | 'partial' | 'ambiguous' | 'unresolved' | 'not_applicable';
 export type RegionMappingMethod =
-  'current_code' | 'historical_crosswalk' | 'exact_name' | 'manual' | 'none';
+  | 'current_code'
+  | 'current_parent_code'
+  | 'historical_crosswalk'
+  | 'exact_name'
+  | 'manual'
+  | 'none';
 export type RegionGroupType = 'municipality' | 'prefecture' | 'province_direct_county' | 'unknown';
 
 interface SourceNode {
@@ -49,19 +54,40 @@ export interface AdministrativeDivision {
 export interface AdministrativeDivisionCrosswalk {
   source_code: string;
   source_name: string;
+  source_names?: string[];
   source_level: AdministrativeDivisionLevel;
   source_type: string;
+  source_parent_codes?: string[];
+  source_first_year?: number;
+  source_last_year?: number;
   target_code?: string;
+  candidate_target_codes?: string[];
   mapping_kind: string;
-  mapping_scope: 'full' | 'parent_only' | 'ambiguous';
+  mapping_scope: 'full' | 'parent_only' | 'ambiguous' | 'unresolved';
   auto_apply: boolean;
   confidence: number;
+  mapping_reason: string;
   evidence: string;
+}
+
+export interface AdministrativeDivisionCrosswalkGeneration {
+  history_package?: string;
+  history_sha512?: string;
+  history_year_min?: number;
+  history_year_max_used?: number;
+  target_source_hash?: string;
+  history_unique_codes: number;
+  current_numeric_codes?: number;
+  historical_only_codes: number;
+  covered_source_codes: number;
+  scope_counts?: Record<string, number>;
+  reviewed_overrides?: number;
 }
 
 interface CrosswalkFile {
   rule_version: string;
   target_dataset_version: string;
+  generation?: AdministrativeDivisionCrosswalkGeneration;
   entries: AdministrativeDivisionCrosswalk[];
 }
 
@@ -90,6 +116,7 @@ export interface AdministrativeDivisionDataset {
   metadata: AdministrativeDivisionMetadata;
   divisions: AdministrativeDivision[];
   crosswalk: AdministrativeDivisionCrosswalk[];
+  crosswalk_generation?: AdministrativeDivisionCrosswalkGeneration;
 }
 
 interface LoadedDataset extends AdministrativeDivisionDataset {
@@ -157,19 +184,30 @@ function validateDataset(dataset: LoadedDataset): void {
       throw new Error(`region_parent_level_invalid:${division.source_code}`);
     }
   }
+  const sourceCodes = new Set<string>();
   for (const entry of dataset.crosswalk) {
     if (!/^\d{6}$/.test(entry.source_code)) {
       throw new Error(`region_crosswalk_source_invalid:${entry.source_code}`);
     }
+    if (sourceCodes.has(entry.source_code)) {
+      throw new Error(`region_crosswalk_source_duplicate:${entry.source_code}`);
+    }
+    sourceCodes.add(entry.source_code);
     if (
       entry.auto_apply &&
-      entry.mapping_scope !== 'ambiguous' &&
-      (!entry.target_code || !dataset.byCode.has(entry.target_code))
+      (!['full', 'parent_only'].includes(entry.mapping_scope) ||
+        !entry.target_code ||
+        !dataset.byCode.has(entry.target_code))
     ) {
       throw new Error(`region_crosswalk_target_invalid:${entry.source_code}`);
     }
     if (entry.confidence < 0 || entry.confidence > 100) {
       throw new Error(`region_crosswalk_confidence_invalid:${entry.source_code}`);
+    }
+    for (const candidate of entry.candidate_target_codes ?? []) {
+      if (!dataset.byCode.has(candidate)) {
+        throw new Error(`region_crosswalk_candidate_invalid:${entry.source_code}:${candidate}`);
+      }
     }
   }
 }
@@ -194,6 +232,12 @@ export function loadAdministrativeDivisionDataset(): AdministrativeDivisionDatas
   ) {
     throw new Error('region_crosswalk_version_mismatch');
   }
+  if (
+    crosswalkFile.generation &&
+    crosswalkFile.generation.covered_source_codes !== crosswalkFile.generation.historical_only_codes
+  ) {
+    throw new Error('region_crosswalk_incomplete');
+  }
   const divisions = flattenSnapshot(response.data);
   const byCode = new Map(
     divisions.flatMap((division) => (division.code ? [[division.code, division] as const] : [])),
@@ -208,6 +252,7 @@ export function loadAdministrativeDivisionDataset(): AdministrativeDivisionDatas
     metadata,
     divisions,
     crosswalk: crosswalkFile.entries,
+    crosswalk_generation: crosswalkFile.generation,
     byCode,
     crosswalkByCode,
   };
@@ -304,6 +349,26 @@ export function standardizeAdministrativeRegion(
   }
 
   const candidates = dataset.crosswalkByCode.get(originCode) ?? [];
+  if (candidates.length === 0) {
+    const currentPrefecture = dataset.byCode.get(`${originCode.slice(0, 4)}00`);
+    const currentProvince = dataset.byCode.get(`${originCode.slice(0, 2)}0000`);
+    const safeParent =
+      currentPrefecture?.level === 'prefecture'
+        ? currentPrefecture
+        : currentProvince?.division_type === '直辖市'
+          ? currentProvince
+          : undefined;
+    if (safeParent) {
+      return {
+        ...baseResult('resident_id'),
+        origin_code: originCode,
+        ...resolveHierarchy(safeParent, dataset),
+        status: 'partial',
+        method: 'current_parent_code',
+        confidence: 60,
+      };
+    }
+  }
   if (candidates.length !== 1 || candidates[0].mapping_scope === 'ambiguous') {
     return {
       ...baseResult('resident_id'),

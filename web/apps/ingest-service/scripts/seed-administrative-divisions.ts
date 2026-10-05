@@ -92,24 +92,30 @@ async function main(): Promise<void> {
     if (dataset.crosswalk.length) {
       const rows = dataset.crosswalk.map((entry) => ({
         ...entry,
+        source_names: entry.source_names ?? [entry.source_name],
+        source_parent_codes: entry.source_parent_codes ?? [],
+        candidate_target_codes: entry.candidate_target_codes ?? [],
         rule_version: REGION_RULE_VERSION,
         target_dataset_version: dataset.metadata.dataset_version,
       }));
       await client.query(
         `INSERT INTO administrative_division_crosswalk (
-           rule_version, target_dataset_version, source_code, source_name,
-           source_level, source_type, target_code, mapping_kind, mapping_scope,
-           auto_apply, confidence, evidence
+           rule_version, target_dataset_version, source_code, source_name, source_names,
+           source_level, source_type, source_parent_codes, source_first_year, source_last_year,
+           target_code, candidate_target_codes, mapping_kind, mapping_scope,
+           auto_apply, confidence, mapping_reason, evidence
          )
-         SELECT rule_version, target_dataset_version, source_code, source_name,
-                source_level, source_type, target_code, mapping_kind, mapping_scope,
-                auto_apply, confidence, evidence
+         SELECT rule_version, target_dataset_version, source_code, source_name, source_names,
+                source_level, source_type, source_parent_codes, source_first_year, source_last_year,
+                target_code, candidate_target_codes, mapping_kind, mapping_scope,
+                auto_apply, confidence, mapping_reason, evidence
            FROM jsonb_to_recordset($1::jsonb) AS item(
              rule_version VARCHAR(32), target_dataset_version VARCHAR(32),
-             source_code CHAR(6), source_name VARCHAR(64), source_level VARCHAR(16),
-             source_type VARCHAR(32), target_code CHAR(6), mapping_kind VARCHAR(32),
-             mapping_scope VARCHAR(16), auto_apply BOOLEAN, confidence SMALLINT,
-             evidence TEXT
+             source_code CHAR(6), source_name VARCHAR(64), source_names JSONB,
+             source_level VARCHAR(16), source_type VARCHAR(32), source_parent_codes JSONB,
+             source_first_year SMALLINT, source_last_year SMALLINT, target_code CHAR(6),
+             candidate_target_codes JSONB, mapping_kind VARCHAR(32), mapping_scope VARCHAR(16),
+             auto_apply BOOLEAN, confidence SMALLINT, mapping_reason VARCHAR(64), evidence TEXT
            )`,
         [JSON.stringify(rows)],
       );

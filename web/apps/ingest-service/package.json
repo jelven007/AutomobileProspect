@@ -22,6 +22,8 @@
     "ingest:run": "tsx src/cli.ts run",
     "ingest:ls": "tsx src/cli.ts ls",
     "region:audit": "tsx scripts/audit-region-coverage.ts",
+    "region:crosswalk": "tsx scripts/generate-administrative-crosswalk.ts",
+    "region:evaluate": "tsx scripts/evaluate-administrative-divisions.ts",
     "region:snapshot": "tsx scripts/update-administrative-divisions.ts",
     "region:seed": "tsx scripts/seed-administrative-divisions.ts",
     "region:update": "pnpm update --latest @cndiv/source-history china-division",

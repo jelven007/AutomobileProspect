@@ -16,6 +16,17 @@ describe('administrative division dataset', () => {
       county: 2847,
     });
     expect(dataset.divisions).toHaveLength(3214);
+    expect(new Set(dataset.crosswalk.map((entry) => entry.source_code)).size).toBe(3548);
+    expect(dataset.crosswalk.filter((entry) => entry.mapping_scope === 'full')).toHaveLength(2237);
+    expect(dataset.crosswalk.filter((entry) => entry.mapping_scope === 'parent_only')).toHaveLength(
+      505,
+    );
+    expect(dataset.crosswalk.filter((entry) => entry.mapping_scope === 'ambiguous')).toHaveLength(
+      760,
+    );
+    expect(dataset.crosswalk.filter((entry) => entry.mapping_scope === 'unresolved')).toHaveLength(
+      46,
+    );
   });
 
   it('contains four municipalities and 33 province-direct county units', () => {
@@ -103,12 +114,36 @@ describe('standardizeAdministrativeRegion', () => {
     });
   });
 
+  it('uses a current prefecture prefix as a safe partial fallback', () => {
+    expect(standardizeAdministrativeRegion('resident_id', '320520199001011234')).toMatchObject({
+      origin_code: '320520',
+      current_province: { code: '320000', name: '江苏省' },
+      current_prefecture: { code: '320500', name: '苏州市' },
+      status: 'partial',
+      method: 'current_parent_code',
+      confidence: 60,
+    });
+  });
+
   it('does not auto-apply a historically reused code', () => {
     expect(standardizeAdministrativeRegion('resident_id', '362321199001011234')).toMatchObject({
       origin_code: '362321',
       status: 'ambiguous',
       method: 'historical_crosswalk',
       confidence: 100,
+    });
+  });
+
+  it('applies the 2025 Liangjiang merge and keeps the Yubei split ambiguous', () => {
+    expect(standardizeAdministrativeRegion('resident_id', '500105199001011234')).toMatchObject({
+      current_county: { code: '500157', name: '两江新区' },
+      status: 'historical_mapped',
+      confidence: 100,
+    });
+    expect(standardizeAdministrativeRegion('resident_id', '500112199001011234')).toMatchObject({
+      origin_code: '500112',
+      status: 'ambiguous',
+      method: 'historical_crosswalk',
     });
   });
 

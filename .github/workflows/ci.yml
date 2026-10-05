@@ -40,6 +40,7 @@ jobs:
           cache: pnpm
           cache-dependency-path: web/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @leadops/ingest-service region:crosswalk
       - run: pnpm --filter @leadops/ingest-service db:migrate
       - run: pnpm --filter @leadops/ingest-service region:seed
       - run: pnpm --filter @leadops/bff exec prisma generate
