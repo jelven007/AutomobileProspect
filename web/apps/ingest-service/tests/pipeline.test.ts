@@ -133,6 +133,7 @@ describe('identity admission before deduplication', () => {
     expect(cleanRow(['客户', '11010519491231002x'], identitySchema, ctx).id_card).toBe('11010519491231002X');
     const { row, warnings } = cleanRowDetailed(['客户', '999999197410137219'], identitySchema, ctx);
     expect(row.id_card).toBe('999999197410137219');
+    expect(row.province).toBe('其他');
     expect(warnings).toContain('id_card_province_unknown');
     expect(cleanRowDetailed(['客户', '510223197410137210'], identitySchema, ctx).warnings)
       .toContain('id_card_checksum_invalid');

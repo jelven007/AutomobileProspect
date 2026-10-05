@@ -312,7 +312,8 @@ export class CustomerController {
           phone_masked: dto.phone_masked ?? null,
           address: dto.address ?? null,
           stat_time: dto.stat_time ? new Date(dto.stat_time) : null,
-          province: dto.province ?? info.province ?? null,
+          province: dto.province?.trim() || info.province
+            || (document.id_type === 'resident_id' ? '其他' : null),
           city: dto.city ?? info.city ?? null,
           district: dto.district ?? info.district ?? null,
           occupation: dto.occupation ?? null,
@@ -363,6 +364,7 @@ export class CustomerController {
       const document = dto.id_card !== undefined || dto.id_type !== undefined
         ? requireDocument(dto.id_card ?? existing.id_card, dto.id_type ?? existing.id_type ?? 'resident_id')
         : { id_card: existing.id_card as string, id_type: existing.id_type ?? 'resident_id' };
+      const documentInfo = document.id_type === 'resident_id' ? parseIdCard(document.id_card) : {};
       const data: Prisma.CustomerUncheckedUpdateInput = {
         version: { increment: 1 },
         updated_at: new Date(),
@@ -387,7 +389,16 @@ export class CustomerController {
       if (dto.phone_masked !== undefined) data.phone_masked = dto.phone_masked || null;
       if (dto.address !== undefined) data.address = dto.address || null;
       if (dto.stat_time !== undefined) data.stat_time = dto.stat_time ? new Date(dto.stat_time) : null;
-      if (dto.province !== undefined) data.province = dto.province || null;
+      if (dto.province !== undefined) {
+        data.province = dto.province.trim() || documentInfo.province
+          || (document.id_type === 'resident_id' ? '其他' : null);
+      } else if (
+        (dto.id_card !== undefined || dto.id_type !== undefined)
+        && document.id_type === 'resident_id'
+        && !existing.province
+      ) {
+        data.province = documentInfo.province ?? '其他';
+      }
       if (dto.city !== undefined) data.city = dto.city || null;
       if (dto.district !== undefined) data.district = dto.district || null;
       if (dto.occupation !== undefined) data.occupation = dto.occupation || null;

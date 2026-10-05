@@ -283,7 +283,7 @@ function prepareRows(rows: IngestRow[]): StagedIngestRow[] {
       phone_masked: optionalString(row.phone_masked),
       address: optionalString(row.address),
       stat_time: optionalString(row.stat_time),
-      province: optionalString(row.province),
+      province: optionalString(row.province) ?? (row.id_type === 'resident_id' ? '其他' : null),
       city: optionalString(row.city),
       district: optionalString(row.district),
       occupation: optionalString(row.occupation),

@@ -235,7 +235,10 @@ export function cleanRowDetailed(
     if (info.gender && (!row.gender || row.gender === 'U')) row.gender = info.gender;
     if (info.birth_date_corrected) warnings.push('id_card_birth_date_corrected');
     if (info.checksum_valid === false) warnings.push('id_card_checksum_invalid');
-    if (!info.province) warnings.push('id_card_province_unknown');
+    if (!info.province) {
+      warnings.push('id_card_province_unknown');
+      if (!row.province) row.province = '其他';
+    }
     if (!info.city) warnings.push('id_card_city_unknown');
     if (!info.district) warnings.push('id_card_district_unknown');
   }

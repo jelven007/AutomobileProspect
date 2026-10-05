@@ -132,6 +132,21 @@ describe.sequential('CustomerService PostgreSQL integration', () => {
     expect(await prisma.customerIdentity.count({ where: { id_card: '未知' } })).toBe(0);
   });
 
+  it('defaults an unknown resident province to 其他', async () => {
+    const key = idCard('114');
+    const batch = `${runId}-unknown-province`;
+    await service.upsertBatch([{
+      name: '未知省份客户',
+      id_card: key,
+      id_type: 'resident_id',
+      ingest_batch: batch,
+    }]);
+    expect(await prisma.customer.findFirst({
+      where: { id_card: key, is_deleted: false },
+      select: { province: true },
+    })).toEqual({ province: '其他' });
+  });
+
   it('merges 15/17/18 digit representations using one canonical identity', async () => {
     const key = idCard('07');
     const oldKey = key.slice(0, 6) + key.slice(8, 17);
